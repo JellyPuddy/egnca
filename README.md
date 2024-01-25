@@ -1,6 +1,6 @@
 # E(*n*)-equivariant Graph Cellular Automata
 
-This repository is the official implementation of [E(*n*)-equivariant Graph Cellular Automata](https://arxiv.org/abs/2301.10497).
+This repository is a fork of https://github.com/gengala/egnca attempting to improve model expressiveness and remove fixed edges during training
 
 **N.B.** Sometimes GIFs are not properly loaded in `README.md`. Please refresh the page.  
 
