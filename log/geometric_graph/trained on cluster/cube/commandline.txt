@@ -1,0 +1,1 @@
+/home/mcs001/20191934/egnca-main/trainers/geometric_graph.py -ds Cube -sdg 0.05 -rdg 1.0 -bsc 0 16 --angles true

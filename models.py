@@ -53,6 +53,7 @@ class EncoderEGNCA(nn.Module):
         fire_rate: Optional[float] = 1.0,
         norm_type: Optional[str] = None,
         norm_cap: Optional[float] = None,
+        use_angles: Optional[bool] = True
     ):
         super(EncoderEGNCA, self).__init__()
         assert norm_type is None or norm_type == 'nn' or norm_type == 'pn'
@@ -79,7 +80,8 @@ class EncoderEGNCA(nn.Module):
                 act_name=act_name,
                 is_residual=is_residual,
                 has_attention=has_attention,
-                has_coord_act=has_coord_act))
+                has_coord_act=has_coord_act,
+                use_angles=use_angles))
         self.egnn = EGNN(layers)
 
     @property
@@ -170,6 +172,8 @@ class FixedTargetGAE(pl.LightningModule):
         self.register_buffer('target_coord', target_coord * args.scale)
         self.register_buffer('edge_index', edge_index)
 
+        use_angles = args.angles if 'angles' in args else False
+
         self.encoder = EncoderEGNCA(
             coord_dim=self.target_coord.size(1),
             node_dim=args.node_dim,
@@ -181,7 +185,8 @@ class FixedTargetGAE(pl.LightningModule):
             has_attention=args.has_attention,
             has_coord_act=args.has_coord_act,
             fire_rate=args.fire_rate,
-            norm_type=args.norm_type)
+            norm_type=args.norm_type,
+            use_angles=use_angles)
 
         self.pool = GaussianSeedPool(
             pool_size=args.pool_size,

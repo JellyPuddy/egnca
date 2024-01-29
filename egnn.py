@@ -1,7 +1,6 @@
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from torch import nn
 import torch
-
 
 def aggregated_sum(
     data: torch.Tensor,
@@ -13,6 +12,23 @@ def aggregated_sum(
     agg = data.new_full((num_segments, data.size(1)), 0).scatter_add_(0, index, data)
     if mean:
         counts = data.new_full((num_segments, data.size(1)), 0).scatter_add_(0, index, torch.ones_like(data))
+        agg = agg / counts.clamp(min=1)
+    return agg
+
+def aggregated_sum_2_indices(
+    data: torch.Tensor,
+    index_i: torch.LongTensor,
+    index_j: torch.LongTensor,
+    num_segments: int,
+    mean: bool = False
+):
+    index_i = index_i.unsqueeze(1).repeat(1, data.size(1))
+    index_j = index_j.unsqueeze(1).repeat(1, data.size(1))
+    agg = data.new_full((num_segments, data.size(1)), 0).scatter_add_(0, index_i, data)
+    agg = agg.scatter_add_(0, index_j, data)
+    if mean:
+        counts = data.new_full((num_segments, data.size(1)), 0).scatter_add_(0, index_i, torch.ones_like(data))
+        counts = counts.scatter_add_(0, index_j, torch.ones_like(data))
         agg = agg / counts.clamp(min=1)
     return agg
 
@@ -44,7 +60,8 @@ class EGC(nn.Module):
         normalize: Optional[bool] = False,
         aggr_coord: Optional[str] = 'mean',
         aggr_hidden:  Optional[str] = 'sum',
-        has_coord_act: Optional[bool] = False
+        has_coord_act: Optional[bool] = False,
+        use_angles: Optional[bool] = False
     ):
         super(EGC, self).__init__()
         assert aggr_coord == 'mean' or aggr_coord == 'sum'
@@ -64,15 +81,26 @@ class EGC(nn.Module):
         self.aggr_coord = aggr_coord
         self.aggr_hidden = aggr_hidden
         self.has_coord_act = has_coord_act
+        self.use_angles = use_angles
+
+        expressiveness_dim = message_dim if use_angles else 0
 
         act = {'tanh': nn.Tanh(), 'lrelu': nn.LeakyReLU(), 'silu': nn.SiLU()}[act_name]
 
         self.edge_mlp = nn.Sequential(
-            nn.Linear(node_dim + node_dim + edge_attr_dim + 1, message_dim),
+            nn.Linear(node_dim + node_dim + edge_attr_dim + expressiveness_dim + 1, message_dim),
             act,
             nn.Linear(message_dim, message_dim),
             act
         )
+
+        if use_angles:
+            self.edge_mlp2 = nn.Sequential(
+                nn.Linear(node_dim + node_dim + edge_attr_dim + 1, message_dim),
+                act,
+                nn.Linear(message_dim, message_dim),
+                act
+            )
 
         self.node_mlp = nn.Sequential(
             nn.Linear(message_dim + node_dim, message_dim),
@@ -104,6 +132,7 @@ class EGC(nn.Module):
 
     def edge_model(
         self,
+        coord: torch.Tensor,
         node_feat: torch.Tensor,
         edge_index: torch.LongTensor,
         coord_radial: torch.Tensor,
@@ -111,7 +140,10 @@ class EGC(nn.Module):
         edge_attr: Optional[torch.Tensor] = None
     ):
         if node_feat.ndim == 2:
-            out = self.edge_model_sparse(node_feat, edge_index, coord_radial, edge_weight, edge_attr)
+            if self.use_angles:
+                out = self.edge_model_sparse_angles(coord, node_feat, edge_index, coord_radial, edge_weight, edge_attr)
+            else:
+                out = self.edge_model_sparse(node_feat, edge_index, coord_radial, edge_weight, edge_attr)
         else:
             out = self.edge_model_dense(node_feat, edge_index, coord_radial, edge_weight, edge_attr)
         return out
@@ -155,6 +187,37 @@ class EGC(nn.Module):
             out = self.coord2radial_dense(coord, edge_index)
         return out
 
+    # Adapted from https://github.com/pyg-team/pytorch_geometric/blob/caf5f57bf10f9b697b418ea7ec50594ee7a21b73/torch_geometric/nn/models/dimenet.py#L413-L433
+    def triplets(
+        self,
+        edge_index,
+        num_nodes,
+    ):
+        row, col = edge_index  # j->i
+
+        # Create a dense adjacency matrix
+        adj_matrix = torch.zeros((num_nodes, num_nodes), dtype=torch.bool, device=edge_index.device)
+        adj_matrix[row, col] = 1
+
+        # Get the row-wise neighbors for each edge
+        adj_row = adj_matrix[row]
+
+        # Calculate the number of triplets for each edge
+        num_triplets = adj_row.sum(dim=1, dtype=torch.long)
+
+        # Node indices (k->j->i) for triplets.
+        idx_i = col.repeat_interleave(num_triplets)
+        idx_j = row.repeat_interleave(num_triplets)
+        idx_k = adj_row.nonzero(as_tuple=True)[1]
+        mask = idx_i != idx_k  # Remove i == k triplets.
+        idx_i, idx_j, idx_k = idx_i[mask], idx_j[mask], idx_k[mask]
+
+        # Edge indices (k-j, j->i) for triplets.
+        idx_kj = adj_matrix[idx_j, idx_k].nonzero(as_tuple=True)[0]
+        idx_ji = adj_matrix[idx_k, idx_i].nonzero(as_tuple=True)[0]
+
+        return col, row, idx_i, idx_j, idx_k, idx_kj, idx_ji
+
     def edge_model_sparse(
         self,
         node_feat: torch.Tensor,
@@ -168,6 +231,43 @@ class EGC(nn.Module):
             edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], coord_radial, edge_attr], dim=1)
         else:
             edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], coord_radial], dim=1)
+
+        out = self.edge_mlp(edge_feat)
+        if edge_weight is not None:
+            out = edge_weight.unsqueeze(1) * out
+        if self.has_attention:
+            out = self.attention_mlp(out) * out
+
+        return out
+    
+    def edge_model_sparse_angles(
+        self,
+        coord: torch.Tensor,
+        node_feat: torch.Tensor,
+        edge_index: torch.LongTensor,
+        coord_radial: torch.Tensor,
+        edge_weight: Optional[torch.Tensor] = None,
+        edge_attr: Optional[torch.Tensor] = None
+    ):
+        i, j, idx_i, idx_j, idx_k, idx_ki, idx_ij = self.triplets(
+            edge_index, num_nodes=node_feat.size(0))
+
+        # Calculate angles.
+        coord_ik, coord_ji = coord[idx_i] - coord[idx_k], coord[idx_j] - coord[idx_i]
+        a = (coord_ji * coord_ik).sum(dim=-1)
+        b = torch.cross(coord_ji, coord_ik).norm(dim=-1)
+        angle = torch.atan2(b, a)
+
+        edge_feat2 = torch.cat([node_feat[idx_i], node_feat[idx_k], angle.unsqueeze(-1)], dim=1)
+
+        out = self.edge_mlp2(edge_feat2)
+        out_agg = aggregated_sum_2_indices(out, idx_i, idx_j, coord_radial.size(0), mean=self.aggr_coord == 'mean')
+
+        if edge_attr is not None:
+            assert edge_attr.size(1) == self.edge_attr_dim
+            edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, coord_radial, edge_attr], dim=1)
+        else:
+            edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, coord_radial], dim=1)
 
         out = self.edge_mlp(edge_feat)
         if edge_weight is not None:
@@ -315,7 +415,7 @@ class EGC(nn.Module):
         assert not self.has_vel or vel is not None
 
         coord_diff, coord_radial = self.coord2radial(coord, edge_index)
-        edge_feat = self.edge_model(node_feat, edge_index, coord_radial, edge_weight, edge_attr)
+        edge_feat = self.edge_model(coord, node_feat, edge_index, coord_radial, edge_weight, edge_attr)
 
         if self.has_vel:
             coord, vel = self.coord_model(coord, coord_diff, edge_feat, edge_index, node_feat, vel)
