@@ -258,7 +258,7 @@ class EGC(nn.Module):
         b = torch.cross(coord_ji, coord_ik).norm(dim=-1)
         angle = torch.atan2(b, a)
 
-        edge_feat2 = torch.cat([node_feat[idx_i], node_feat[idx_k], angle.unsqueeze(-1)], dim=1)
+        edge_feat2 = torch.cat([node_feat[idx_j], node_feat[idx_k], angle.unsqueeze(-1)], dim=1)
 
         out = self.edge_mlp2(edge_feat2)
         out_agg = aggregated_sum_2_indices(out, idx_i, idx_j, coord_radial.size(0), mean=self.aggr_coord == 'mean')
