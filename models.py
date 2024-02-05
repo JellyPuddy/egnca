@@ -53,7 +53,9 @@ class EncoderEGNCA(nn.Module):
         fire_rate: Optional[float] = 1.0,
         norm_type: Optional[str] = None,
         norm_cap: Optional[float] = None,
-        use_angles: Optional[bool] = True
+        use_angles: Optional[bool] = True,
+        relative_edges: Optional[bool] = False,
+        dynamic_edges: Optional[bool] = False
     ):
         super(EncoderEGNCA, self).__init__()
         assert norm_type is None or norm_type == 'nn' or norm_type == 'pn'
@@ -63,6 +65,8 @@ class EncoderEGNCA(nn.Module):
         self.std = std
         self.fire_rate = fire_rate
         self.init_rand_node_feat = init_rand_node_feat
+        self.relative_edges = relative_edges
+        self.dynamic_edges = dynamic_edges
 
         if norm_type == 'nn':
             self.normalise = NodeNorm(root_power=2.0 if norm_cap is None else norm_cap)
@@ -148,11 +152,14 @@ class EncoderEGNCA(nn.Module):
             coord = self.init_coord(num_nodes, dtype=dtype, device=edge_index.device)
         if node_feat is None:
             node_feat = self.init_node_feat(coord.size(0), dtype=dtype, device=coord.device)
+        
+        batch_size = len(n_nodes) if n_nodes is not None else 1
 
         loop = tqdm(range(n_steps)) if progress_bar else range(n_steps)
         inter_states = [(coord, node_feat)] if return_inter_states else None
         for _ in loop:
-            coord, node_feat = self.stochastic_update(edge_index, coord, node_feat, n_nodes)
+            new_edge_index = compute_edge_index(edge_index, coord, batch_size, self.relative_edges, self.dynamic_edges, in_step=True)
+            coord, node_feat = self.stochastic_update(new_edge_index, coord, node_feat, n_nodes)
             if return_inter_states: inter_states.append((coord, node_feat))
 
         return list(map(list, zip(*inter_states))) if return_inter_states else (coord, node_feat)
@@ -172,7 +179,11 @@ class FixedTargetGAE(pl.LightningModule):
         self.register_buffer('target_coord', target_coord * args.scale)
         self.register_buffer('edge_index', edge_index)
 
+        # Make sure that the attributes exist in the args namespace
+        # Needed for backward compatibility with old checkpoints
         use_angles = args.angles if 'angles' in args else False
+        self.relative_edges = args.relative_edges if 'relative_edges' in args else False
+        self.dynamic_edges = args.dynamic_edges if 'dynamic_edges' in args else False
 
         self.encoder = EncoderEGNCA(
             coord_dim=self.target_coord.size(1),
@@ -186,7 +197,9 @@ class FixedTargetGAE(pl.LightningModule):
             has_coord_act=args.has_coord_act,
             fire_rate=args.fire_rate,
             norm_type=args.norm_type,
-            use_angles=use_angles)
+            use_angles=use_angles,
+            relative_edges=args.relative_edges,
+            dynamic_edges=args.dynamic_edges)
 
         self.pool = GaussianSeedPool(
             pool_size=args.pool_size,
@@ -215,10 +228,12 @@ class FixedTargetGAE(pl.LightningModule):
             list_scheduler_step(self.args.batch_sch, self.current_epoch)
         batch_size = len(batch.n_nodes)
 
+        edge_index = compute_edge_index(batch.edge_index, self.init_coord, batch_size, self.relative_edges, self.dynamic_edges)
+
         n_steps = np.random.randint(self.args.n_min_steps, self.args.n_max_steps + 1)
         init_coord, init_node_feat, id_seeds = self.pool.get_batch(batch_size=batch_size)
         final_coord, final_node_feat = self.encoder(
-            batch.edge_index, init_coord, init_node_feat, n_steps=n_steps, n_nodes=batch.n_nodes)
+            edge_index, init_coord, init_node_feat, n_steps=n_steps, n_nodes=batch.n_nodes)
 
         edge_weight = torch.norm(final_coord[batch.rand_edge_index[0]] - final_coord[batch.rand_edge_index[1]], dim=-1)
         loss_per_edge = self.mse(edge_weight, batch.rand_edge_weight)
@@ -269,8 +284,10 @@ class FixedTargetGAE(pl.LightningModule):
         if translate:
             translation = torch.randn(1, self.encoder.coord_dim).to(device=self.device, dtype=dtype)
             init_coord += translation
+        
+        edge_index = compute_edge_index(self.edge_index, init_coord, 1, self.relative_edges, self.dynamic_edges)
         out = self.encoder(
-            self.edge_index, coord=init_coord, node_feat=init_node_feat, n_steps=n_steps,
+            edge_index, coord=init_coord, node_feat=init_node_feat, n_steps=n_steps,
             return_inter_states=return_inter_states, progress_bar=progress_bar)
         return out
 

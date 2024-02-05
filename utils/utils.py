@@ -230,3 +230,38 @@ def list_scheduler_step(
 ):
     assert time_step >= 0
     return schedule[-1::-2][np.argmax([schedule[i] <= time_step for i in range(len(schedule) - 2, -1, -2)])]
+
+def compute_edge_index(
+    default: torch.Tensor,
+    coord: torch.Tensor,
+    batch_size: int,
+    relative_edges: bool,
+    dynamic_edges: bool,
+    distance: Optional[float] = 0.15,
+    in_step: Optional[bool] = False
+):
+    if not relative_edges:
+        return default
+    
+    if not dynamic_edges and in_step:
+        return default
+
+    with torch.no_grad():
+        # Reshape the coordinates from (batch_size * num_nodes, coord_dimension) to (batch_size, num_nodes, coord_dimension)
+        reshaped_coord = coord.reshape(batch_size, -1, coord.size(1))
+
+        # Compute the distance matrix per batch
+        dist_matrix = torch.cdist(reshaped_coord, reshaped_coord)
+        mask = dist_matrix < distance
+
+        # Remove self-edges
+        [mask[i].fill_diagonal_(False) for i in range(batch_size)]
+
+        # Create the edge_index, taking into account that the first node of batch 2 should have index num_nodes, the first node of batch 3 should have index 2 * num_nodes, and so on
+        num_nodes = mask.size(1)
+        edge_index = [torch.nonzero(mask[i], as_tuple=False).t() + (num_nodes * i) for i in range(batch_size)]
+        edge_index = torch.cat(edge_index, dim=1)
+
+    # Move edge_index to the same device as init_coord
+    edge_index = edge_index.to(coord.device)
+    return edge_index
