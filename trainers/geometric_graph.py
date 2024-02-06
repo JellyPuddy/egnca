@@ -28,6 +28,8 @@ parser.add_argument('-rdg', '--radius_damage',  type=float, default=None,   help
 parser.add_argument('-re',  dest='relative_edges', action='store_true', default=False, help='use relative edges')
 parser.add_argument('-de',  dest='dynamic_edges',  action='store_true', default=False, help='use dynamic edges')
 parser.add_argument('-an',  dest='angles',         action='store_true', default=False, help='use angles as node features')
+parser.add_argument('-ed',  '--edge_distance',  type=float, default=None,   help='maximal edge distance for dynamic edges (will be applied after --edge_num, if both are set; will default to 0.15 if neither is set)')
+parser.add_argument('-en',  '--edge_num',       type=int,   default=None,   help='maximal number of edges for dynamic edges')
 
 parser.add_argument('-nd',  '--node_dim',       type=int,   default=16,     help='node feature dimension')
 parser.add_argument('-md',  '--message_dim',    type=int,   default=32,     help='hidden feature dimension')
@@ -61,6 +63,8 @@ args = parser.parse_args()
 if args.patience is None: args.patience = args.training_steps
 if args.patience_sch is None: args.patience_sch = args.training_steps
 if args.norm_type == 'none': args.norm_type = None
+# Make sure the default value for edge_distance is set only if edge_num is not set
+if args.edge_distance is None and args.edge_num is None: args.edge_distance = 0.15
 print(args)
 
 target_coord, edge_index = get_geometric_graph(args.dataset)

@@ -55,7 +55,9 @@ class EncoderEGNCA(nn.Module):
         norm_cap: Optional[float] = None,
         use_angles: Optional[bool] = True,
         relative_edges: Optional[bool] = False,
-        dynamic_edges: Optional[bool] = False
+        dynamic_edges: Optional[bool] = False,
+        edge_distance: Optional[float] = 0.15,
+        edge_num: Optional[int] = None
     ):
         super(EncoderEGNCA, self).__init__()
         assert norm_type is None or norm_type == 'nn' or norm_type == 'pn'
@@ -67,6 +69,8 @@ class EncoderEGNCA(nn.Module):
         self.init_rand_node_feat = init_rand_node_feat
         self.relative_edges = relative_edges
         self.dynamic_edges = dynamic_edges
+        self.edge_distance = edge_distance
+        self.edge_num = edge_num
 
         if norm_type == 'nn':
             self.normalise = NodeNorm(root_power=2.0 if norm_cap is None else norm_cap)
@@ -158,7 +162,7 @@ class EncoderEGNCA(nn.Module):
         loop = tqdm(range(n_steps)) if progress_bar else range(n_steps)
         inter_states = [(coord, node_feat)] if return_inter_states else None
         for _ in loop:
-            new_edge_index = compute_edge_index(edge_index, coord, batch_size, self.relative_edges, self.dynamic_edges, in_step=True)
+            new_edge_index = compute_edge_index(edge_index, coord, batch_size, self.relative_edges, self.dynamic_edges, in_step=True, distance=self.edge_distance, n_neighbours=self.edge_num)
             coord, node_feat = self.stochastic_update(new_edge_index, coord, node_feat, n_nodes)
             if return_inter_states: inter_states.append((coord, node_feat))
 
@@ -184,6 +188,8 @@ class FixedTargetGAE(pl.LightningModule):
         use_angles = args.angles if 'angles' in args else False
         self.relative_edges = args.relative_edges if 'relative_edges' in args else False
         self.dynamic_edges = args.dynamic_edges if 'dynamic_edges' in args else False
+        self.edge_distance = args.edge_distance if 'edge_distance' in args else 0.15
+        self.edge_num = args.edge_num if 'edge_num' in args else None
 
         self.encoder = EncoderEGNCA(
             coord_dim=self.target_coord.size(1),
@@ -198,8 +204,10 @@ class FixedTargetGAE(pl.LightningModule):
             fire_rate=args.fire_rate,
             norm_type=args.norm_type,
             use_angles=use_angles,
-            relative_edges=args.relative_edges,
-            dynamic_edges=args.dynamic_edges)
+            relative_edges=self.relative_edges,
+            dynamic_edges=self.dynamic_edges,
+            edge_distance=self.edge_distance,
+            edge_num=self.edge_num)
 
         self.pool = GaussianSeedPool(
             pool_size=args.pool_size,
@@ -228,10 +236,11 @@ class FixedTargetGAE(pl.LightningModule):
             list_scheduler_step(self.args.batch_sch, self.current_epoch)
         batch_size = len(batch.n_nodes)
 
-        edge_index = compute_edge_index(batch.edge_index, self.init_coord, batch_size, self.relative_edges, self.dynamic_edges)
-
         n_steps = np.random.randint(self.args.n_min_steps, self.args.n_max_steps + 1)
         init_coord, init_node_feat, id_seeds = self.pool.get_batch(batch_size=batch_size)
+
+        edge_index = compute_edge_index(batch.edge_index, init_coord, batch_size, self.relative_edges, self.dynamic_edges, distance=self.edge_distance, n_neighbours=self.edge_num)
+
         final_coord, final_node_feat = self.encoder(
             edge_index, init_coord, init_node_feat, n_steps=n_steps, n_nodes=batch.n_nodes)
 
@@ -285,7 +294,7 @@ class FixedTargetGAE(pl.LightningModule):
             translation = torch.randn(1, self.encoder.coord_dim).to(device=self.device, dtype=dtype)
             init_coord += translation
         
-        edge_index = compute_edge_index(self.edge_index, init_coord, 1, self.relative_edges, self.dynamic_edges)
+        edge_index = compute_edge_index(self.edge_index, init_coord, 1, self.relative_edges, self.dynamic_edges, distance=self.edge_distance, n_neighbours=self.edge_num)
         out = self.encoder(
             edge_index, coord=init_coord, node_feat=init_node_feat, n_steps=n_steps,
             return_inter_states=return_inter_states, progress_bar=progress_bar)

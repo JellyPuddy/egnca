@@ -238,8 +238,11 @@ def compute_edge_index(
     relative_edges: bool,
     dynamic_edges: bool,
     distance: Optional[float] = 0.15,
+    n_neighbours: Optional[int] = None,
     in_step: Optional[bool] = False
 ):
+    assert n_neighbours or distance
+
     if not relative_edges:
         return default
     
@@ -252,7 +255,16 @@ def compute_edge_index(
 
         # Compute the distance matrix per batch
         dist_matrix = torch.cdist(reshaped_coord, reshaped_coord)
-        mask = dist_matrix < distance
+
+        # Create the mask for the edges
+        mask = torch.ones_like(dist_matrix, dtype=torch.bool)
+
+        if n_neighbours:
+            # Make sure that each node has at most n_neighbours
+            topk = torch.topk(dist_matrix, n_neighbours+1, largest=False)   
+            mask = mask & (dist_matrix <= topk.values[:, :, -1].unsqueeze(2))
+        if distance:
+            mask = mask & (dist_matrix < distance)
 
         # Remove self-edges
         [mask[i].fill_diagonal_(False) for i in range(batch_size)]
