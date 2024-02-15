@@ -1,4 +1,4 @@
-from utils.utils import compute_edge_index, compute_edge_index_generalized
+from utils.utils import compute_edge_index
 import torch
 
 # Create coord tensor containing the coordinates of a 5x5 sheet.
@@ -43,33 +43,23 @@ n_nodes = torch.tensor([25, 9])
 ### Test the edge index computation with distance=1 and n_neighbours=None.
 
 # Compute the edge index for the 3x3 sheet.
-edge_index_3x3a = compute_edge_index(None, coords_3x3, 1, True, False, distance=1, n_neighbours=None)
+edge_index_3x3a = compute_edge_index(None, coords_3x3, torch.tensor([n_nodes[1]]), True, False, distance=1, n_neighbours=None)
 print(edge_index_3x3a)
-
-edge_index_3x3b = compute_edge_index_generalized(None, coords_3x3, torch.tensor([n_nodes[1]]), True, False, distance=1, n_neighbours=None)
-print(edge_index_3x3b)
 
 # Make sure the edge index is correct.
 assert edge_index_3x3.shape == edge_index_3x3a.shape
 assert torch.all(edge_index_3x3 == edge_index_3x3a)
-assert edge_index_3x3.shape == edge_index_3x3b.shape
-assert torch.all(edge_index_3x3 == edge_index_3x3b)
 
 # Compute the edge index for the 5x5 sheet.
-edge_index_5x5a = compute_edge_index(None, coords_5x5, 1, True, False, distance=1, n_neighbours=None)
+edge_index_5x5a = compute_edge_index(None, coords_5x5, torch.tensor([n_nodes[0]]), True, False, distance=1, n_neighbours=None)
 print(edge_index_5x5a)
-
-edge_index_5x5b = compute_edge_index_generalized(None, coords_5x5, torch.tensor([n_nodes[0]]), True, False, distance=1, n_neighbours=None)
-print(edge_index_5x5b)
 
 # Make sure the edge index is correct.
 assert edge_index_5x5.shape == edge_index_5x5a.shape
 assert torch.all(edge_index_5x5 == edge_index_5x5a)
-assert edge_index_5x5.shape == edge_index_5x5b.shape
-assert torch.all(edge_index_5x5 == edge_index_5x5b)
 
 # Compute the edge index for the 5x5 and 3x3 sheets combined.
-edge_index = compute_edge_index_generalized(None, coords, n_nodes, True, False, distance=1, n_neighbours=None)
+edge_index = compute_edge_index(None, coords, n_nodes, True, False, distance=1, n_neighbours=None)
 print(edge_index)
 
 # Make sure the edge index is correct.
@@ -80,37 +70,26 @@ assert torch.all(edge_index[:, edge_index_5x5.shape[1]:] == edge_index_3x3 + n_n
 ### Test the edge index computation with distance=None and n_neighbours=2.
 
 # Compute the edge index for the 3x3 sheet.
-edge_index_3x3a = compute_edge_index(None, coords_3x3, 1, True, False, distance=None, n_neighbours=2)
+edge_index_3x3a = compute_edge_index(None, coords_3x3, torch.tensor([n_nodes[1]]), True, False, distance=None, n_neighbours=2)
 print(edge_index_3x3a)
-
-edge_index_3x3b = compute_edge_index_generalized(None, coords_3x3, torch.tensor([n_nodes[1]]), True, False, distance=None, n_neighbours=2)
-print(edge_index_3x3b)
 
 # Make sure the edge index is correct.
 assert edge_index_3x3.shape == edge_index_3x3a.shape
 assert torch.all(edge_index_3x3 == edge_index_3x3a)
-assert edge_index_3x3.shape == edge_index_3x3b.shape
-assert torch.all(edge_index_3x3 == edge_index_3x3b)
 
 # Compute the edge index for the 5x5 sheet.
-edge_index_5x5a = compute_edge_index(None, coords_5x5, 1, True, False, distance=None, n_neighbours=2)
+edge_index_5x5a = compute_edge_index(None, coords_5x5, torch.tensor([n_nodes[0]]), True, False, distance=None, n_neighbours=2)
 print(edge_index_5x5a)
-
-edge_index_5x5b = compute_edge_index_generalized(None, coords_5x5, torch.tensor([n_nodes[0]]), True, False, distance=None, n_neighbours=2)
-print(edge_index_5x5b)
 
 # Make sure the edge index is correct.
 assert edge_index_5x5.shape == edge_index_5x5a.shape
 assert torch.all(edge_index_5x5 == edge_index_5x5a)
-assert edge_index_5x5.shape == edge_index_5x5b.shape
-assert torch.all(edge_index_5x5 == edge_index_5x5b)
 
-# -------------This is not implemented yet------------------
 # Compute the edge index for the 5x5 and 3x3 sheets combined.
-# edge_index = compute_edge_index_generalized(None, coords, n_nodes, True, False, distance=None, n_neighbours=2)
-# print(edge_index)
+edge_index = compute_edge_index(None, coords, n_nodes, True, False, distance=None, n_neighbours=2)
+print(edge_index)
 
-# # Make sure the edge index is correct.
-# assert edge_index.shape[1] == edge_index_5x5.shape[1] + edge_index_3x3.shape[1]
-# assert torch.all(edge_index[:, :edge_index_5x5.shape[1]] == edge_index_5x5)
-# assert torch.all(edge_index[:, edge_index_5x5.shape[1]:] == edge_index_3x3 + n_nodes)
+# Make sure the edge index is correct.
+assert edge_index.shape[1] == edge_index_5x5.shape[1] + edge_index_3x3.shape[1]
+assert torch.all(edge_index[:, :edge_index_5x5.shape[1]] == edge_index_5x5)
+assert torch.all(edge_index[:, edge_index_5x5.shape[1]:] == edge_index_3x3 + n_nodes[0])

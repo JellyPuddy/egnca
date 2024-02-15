@@ -234,7 +234,7 @@ def list_scheduler_step(
 def compute_edge_index(
     default: torch.Tensor,
     coord: torch.Tensor,
-    batch_size: int,
+    n_nodes: torch.LongTensor,
     relative_edges: bool,
     dynamic_edges: bool,
     distance: Optional[float] = 0.15,
@@ -250,75 +250,33 @@ def compute_edge_index(
         return default
 
     with torch.no_grad():
-        # Reshape the coordinates from (batch_size * num_nodes, coord_dimension) to (batch_size, num_nodes, coord_dimension)
-        reshaped_coord = coord.reshape(batch_size, -1, coord.size(1))
+        # Reshape the coordinates from (sum(n_nodes), coord_dimension) to (batch_size, max_n_nodes, coord_dimension)
+        max_n_nodes = n_nodes.max()
+        reshaped_coord = torch.zeros(len(n_nodes), max_n_nodes, coord.size(1)).to(coord.device)
+        offset = [0] + torch.Tensor.tolist(n_nodes[:-1].cumsum(0))
+        for i, o, n in zip(range(len(n_nodes)), offset, n_nodes):
+            reshaped_coord[i, :n] = coord[o:o+n]
 
         # Compute the distance matrix per batch
         dist_matrix = torch.cdist(reshaped_coord, reshaped_coord)
 
         # Create the mask for the edges
-        mask = torch.ones_like(dist_matrix, dtype=torch.bool)
+        mask = fully_connected_adj(n_nodes=n_nodes, sparse=False, triu=False).to(coord.device).bool()
+
+        # Set the distance to infinity for the edges that are not in the mask
+        dist_matrix[~mask] = float('inf')
 
         if n_neighbours:
             # Make sure that each node has at most n_neighbours
-            topk = torch.topk(dist_matrix, n_neighbours+1, largest=False)   
+            topk = torch.topk(dist_matrix, n_neighbours, largest=False)   
             mask = mask & (dist_matrix <= topk.values[:, :, -1].unsqueeze(2))
         if distance:
             mask = mask & (dist_matrix <= distance)
 
-        # Remove self-edges
-        [mask[i].fill_diagonal_(False) for i in range(batch_size)]
-
         # Create the edge_index, taking into account that the first node of batch 2 should have index num_nodes, the first node of batch 3 should have index 2 * num_nodes, and so on
-        num_nodes = mask.size(1)
-        edge_index = [torch.nonzero(mask[i], as_tuple=False).t() + (num_nodes * i) for i in range(batch_size)]
+        edge_index = [torch.nonzero(mask[i], as_tuple=False).t() + offset[i] for i in range(len(n_nodes))]
         edge_index = torch.cat(edge_index, dim=1)
 
     # Move edge_index to the same device as init_coord
     edge_index = edge_index.to(coord.device)
-    return edge_index
-
-def compute_edge_index_generalized(
-    default: torch.Tensor,
-    coord: torch.Tensor,
-    n_nodes: torch.LongTensor,
-    relative_edges: bool,
-    dynamic_edges: bool,
-    distance: Optional[float] = 0.15,
-    n_neighbours: Optional[int] = None,
-    in_step: Optional[bool] = False
-):
-    if not relative_edges:
-        return default
-    
-    if not dynamic_edges and in_step:
-        return default
-    
-    if len(n_nodes.unique()) == 1:
-        # If all graphs in the batch have the same number of nodes, we can use the non-generalized version
-        return compute_edge_index(None, coord, len(n_nodes), relative_edges, dynamic_edges, distance, n_neighbours, in_step)
-    
-    if n_neighbours:
-        raise NotImplementedError("Generalized edge index computation with n_neighbours is not implemented yet")
-
-    assert distance
-
-    with torch.no_grad():
-        # Calculate the edge_index per batch
-        offset = [0] + torch.Tensor.tolist(n_nodes[:-1].cumsum(0))
-        edge_index = torch.cat(
-            [torch.ones(n, n).fill_diagonal_(0).nonzero().T + o for o, n in zip(offset, n_nodes)], dim=1).to(coord.device)
-
-        # Compute the distances per batch using the edge_index
-        dist = ((coord[edge_index[0]] - coord[edge_index[1]]) ** 2).sum(-1).sqrt()
-
-        # Create the mask for the edges
-        mask = torch.ones_like(dist, dtype=torch.bool)
-
-        if distance:
-            mask = mask & (dist <= distance)
-        
-        # Create the edge_index
-        edge_index = edge_index[:, mask]
-
     return edge_index

@@ -156,13 +156,14 @@ class EncoderEGNCA(nn.Module):
             coord = self.init_coord(num_nodes, dtype=dtype, device=edge_index.device)
         if node_feat is None:
             node_feat = self.init_node_feat(coord.size(0), dtype=dtype, device=coord.device)
-        
-        batch_size = len(n_nodes) if n_nodes is not None else 1
+
+        if n_nodes is None:
+            n_nodes = torch.tensor([coord.size(0)]).to(coord.device)
 
         loop = tqdm(range(n_steps)) if progress_bar else range(n_steps)
         inter_states = [(coord, node_feat)] if return_inter_states else None
         for _ in loop:
-            new_edge_index = compute_edge_index(edge_index, coord, batch_size, self.relative_edges, self.dynamic_edges, in_step=True, distance=self.edge_distance, n_neighbours=self.edge_num)
+            new_edge_index = compute_edge_index(edge_index, coord, n_nodes, self.relative_edges, self.dynamic_edges, in_step=True, distance=self.edge_distance, n_neighbours=self.edge_num)
             coord, node_feat = self.stochastic_update(new_edge_index, coord, node_feat, n_nodes)
             if return_inter_states: inter_states.append((coord, node_feat))
 
@@ -240,7 +241,7 @@ class FixedTargetGAE(pl.LightningModule):
         n_steps = np.random.randint(self.args.n_min_steps, self.args.n_max_steps + 1)
         init_coord, init_node_feat, id_seeds = self.pool.get_batch(batch_size=batch_size)
 
-        edge_index = compute_edge_index(batch.edge_index, init_coord, batch_size, self.relative_edges, self.dynamic_edges, distance=self.edge_distance, n_neighbours=self.edge_num)
+        edge_index = compute_edge_index(batch.edge_index, init_coord, batch.n_nodes, self.relative_edges, self.dynamic_edges, distance=self.edge_distance, n_neighbours=self.edge_num)
 
         final_coord, final_node_feat = self.encoder(
             edge_index, init_coord, init_node_feat, n_steps=n_steps, n_nodes=batch.n_nodes)
@@ -296,7 +297,8 @@ class FixedTargetGAE(pl.LightningModule):
             translation = torch.randn(1, self.encoder.coord_dim).to(device=self.device, dtype=dtype)
             init_coord += translation
         
-        edge_index = compute_edge_index(self.edge_index, init_coord, 1, self.relative_edges, self.dynamic_edges, distance=self.edge_distance, n_neighbours=self.edge_num)
+        n_nodes = torch.tensor([init_coord.size(0)]).to(init_coord.device)
+        edge_index = compute_edge_index(self.edge_index, init_coord, n_nodes, self.relative_edges, self.dynamic_edges, distance=self.edge_distance, n_neighbours=self.edge_num)
         out = self.encoder(
             edge_index, coord=init_coord, node_feat=init_node_feat, n_steps=n_steps,
             return_inter_states=return_inter_states, progress_bar=progress_bar)
