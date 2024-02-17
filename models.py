@@ -6,6 +6,7 @@ from utils.utils import *
 from torch_geometric.data import Dataset, Data
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import PairNorm
+from torch_geometric import EdgeIndex
 from typing import Optional, List
 from argparse import Namespace
 import pytorch_lightning as pl
@@ -123,7 +124,7 @@ class EncoderEGNCA(nn.Module):
 
     def stochastic_update(
         self,
-        edge_index: torch.LongTensor,
+        edge_index: EdgeIndex,
         in_coord: torch.Tensor,
         in_node_feat: torch.Tensor,
         n_nodes: Optional[torch.LongTensor] = None
@@ -142,7 +143,7 @@ class EncoderEGNCA(nn.Module):
 
     def forward(
         self,
-        edge_index: torch.LongTensor,
+        edge_index: EdgeIndex,
         coord: Optional[torch.Tensor] = None,
         node_feat: Optional[torch.Tensor] = None,
         n_steps: Optional[int] = 1,

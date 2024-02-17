@@ -2,6 +2,7 @@ from sklearn.metrics import confusion_matrix
 from typing import Optional, List, Union
 import numpy as np
 import torch
+from torch_geometric import EdgeIndex
 
 
 def damage_coord(
@@ -50,7 +51,7 @@ def unpad2d(
 
 def aggregated_sum(
     data: torch.Tensor,
-    index: torch.LongTensor,
+    index: EdgeIndex,
     num_segments: int,
     mean: bool = False
 ):
@@ -63,7 +64,7 @@ def aggregated_sum(
 
 
 def edge_index2adj(
-    edge_index: torch.LongTensor,
+    edge_index: EdgeIndex,
     n_nodes: torch.LongTensor
 ):
     n_tot_nodes, n_max_nodes = n_nodes.sum(), n_nodes.max()
@@ -78,7 +79,7 @@ def edge_index2adj(
 
 
 def edge_index2adj_with_weight(
-    edge_index: torch.LongTensor,
+    edge_index: EdgeIndex,
     edge_weight: torch.Tensor,
     n_nodes: torch.LongTensor
 ):
@@ -105,7 +106,7 @@ def adj2edge_index(
     offset = torch.cat([torch.zeros(1, dtype=torch.long).to(adj.device), n_nodes.cumsum(0)[:-1]])
     npg_edge_index = adj.nonzero()
     npg, edge_index = npg_edge_index[:, 0].unsqueeze(1), npg_edge_index[:, 1:]
-    edge_index = (edge_index + offset[npg]).T
+    edge_index = EdgeIndex((edge_index + offset[npg]).T)
     return edge_index
 
 
@@ -140,7 +141,7 @@ def n_nodes2batch(
 
 
 def get_angle_edge_index(
-    edge_index: torch.LongTensor
+    edge_index: EdgeIndex
 ):
     sort_perm = torch.argsort(edge_index[0])
     sort_edge_index = edge_index[:, sort_perm]
@@ -150,11 +151,11 @@ def get_angle_edge_index(
     for index, neighbors in zip(unique_index, sort_edge_index[1].split(degree.tolist())):
         for i in range(1, len(neighbors)):
             angle_edge_index.append(torch.stack([index, neighbors[i - 1], neighbors[i]]))
-    return torch.row_stack(angle_edge_index).T
+    return EdgeIndex(torch.row_stack(angle_edge_index).T)
 
 
 def batched_neg_index_sampling(
-    neg_edge_index: torch.LongTensor,
+    neg_edge_index: EdgeIndex,
     n_neg_edges: torch.LongTensor,
     n_edges: torch.LongTensor
 ):
@@ -179,8 +180,8 @@ def coord_invariant_rec_loss(
 
 
 def edge_cm(
-    gt_edge_index: torch.LongTensor,
-    pred_edge_index: torch.LongTensor,
+    gt_edge_index: EdgeIndex,
+    pred_edge_index: EdgeIndex,
     n_nodes: Union[int, torch.LongTensor],
     prob_cm: Optional[bool] = False,
     return_f1: Optional[bool] = False
@@ -211,8 +212,8 @@ def cm2f1(cm):
 
 
 def edge_f1(
-    gt_edge_index: torch.LongTensor,
-    pred_edge_index: torch.LongTensor,
+    gt_edge_index: EdgeIndex,
+    pred_edge_index: EdgeIndex,
     num_nodes: int
 ):
     return cm2f1(edge_cm(gt_edge_index, pred_edge_index, num_nodes))
@@ -279,4 +280,4 @@ def compute_edge_index(
 
     # Move edge_index to the same device as init_coord
     edge_index = edge_index.to(coord.device)
-    return edge_index
+    return EdgeIndex(edge_index)

@@ -1,5 +1,7 @@
 from utils.utils import compute_edge_index
 import torch
+from torch_geometric import EdgeIndex
+import numpy as np
 
 # Create coord tensor containing the coordinates of a 5x5 sheet.
 coords_5x5 = torch.meshgrid(torch.arange(5, dtype=torch.float32), torch.arange(5, dtype=torch.float32))
@@ -16,8 +18,8 @@ for i in range(5):
             edge_index_5x5.append([i * 5 + j, (i + 1) * 5 + j])
         if j < 4:
             edge_index_5x5.append([i * 5 + j, i * 5 + j + 1])
-edge_index_5x5 = sorted(edge_index_5x5)
-edge_index_5x5 = torch.tensor(edge_index_5x5).t()
+edge_index_5x5 = np.array(sorted(edge_index_5x5), dtype=np.int64)
+edge_index_5x5 = EdgeIndex(np.ascontiguousarray(edge_index_5x5.T))
 
 # Same for a 3x3 sheet.
 coords_3x3 = torch.meshgrid(torch.arange(3, dtype=torch.float32), torch.arange(3, dtype=torch.float32))
@@ -34,8 +36,8 @@ for i in range(3):
             edge_index_3x3.append([i * 3 + j, (i + 1) * 3 + j])
         if j < 2:
             edge_index_3x3.append([i * 3 + j, i * 3 + j + 1])
-edge_index_3x3 = sorted(edge_index_3x3)
-edge_index_3x3 = torch.tensor(edge_index_3x3).t()
+edge_index_3x3 = np.array(sorted(edge_index_3x3), dtype=np.int64)
+edge_index_3x3 = EdgeIndex(np.ascontiguousarray(edge_index_3x3.T))
 
 coords = torch.cat([coords_5x5, coords_3x3], dim=0)
 n_nodes = torch.tensor([25, 9])

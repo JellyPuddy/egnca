@@ -11,6 +11,6 @@ PyGSP
 torch
 torch-scatter
 torch-sparse
-torch-geometric
+torch-geometric>=2.5.0
 pytorch_lightning==1.7.3
 torchmetrics==0.11.4

@@ -1,5 +1,6 @@
 from torch_geometric.data import Data, InMemoryDataset, Dataset
 from torch_geometric.utils import negative_sampling
+from torch_geometric import EdgeIndex
 import torch_geometric.transforms as T
 from scipy.spatial import Delaunay
 
@@ -43,19 +44,20 @@ def generate_planar_edge_index(
     index_src = torch.LongTensor(list(set_of_edges))
     index_dst = torch.cat([index_src[:, 1:], index_src[:, :1]], dim=1)
     edge_index = torch.cat([index_src.T, index_dst.T], dim=1)
+    edge_index = EdgeIndex(edge_index.contiguous())
     return edge_index, coord
 
 
 def get_all_neg_index(
-    edge_index: torch.LongTensor,
+    edge_index: EdgeIndex,
     num_nodes: int
 ):
     num_neg_edges = num_nodes ** 2 - num_nodes - edge_index.size(1)
     if num_neg_edges:
         neg_edge_index = negative_sampling(edge_index, num_nodes, num_neg_samples=num_neg_edges)
-        neg_edge_index = torch.LongTensor(list(set([tuple(sorted(t)) for t in neg_edge_index.T.numpy()]))).T
+        neg_edge_index = EdgeIndex(np.ascontiguousarray(np.array(list(set([tuple(sorted(t)) for t in neg_edge_index.T.numpy()]))).T, dtype=np.int64))
     else:
-        neg_edge_index = torch.LongTensor([[], []])
+        neg_edge_index = EdgeIndex([[], []])
     return neg_edge_index
 
 
@@ -75,7 +77,7 @@ def nx2torch_geo_data(
                 max_node_id += 1
                 nodes_dict[edge[j]] = max_node_id
             edge[j] = nodes_dict[edge[j]]
-    edge_index = torch.tensor(edge_index, dtype=torch.int64).T
+    edge_index = EdgeIndex(torch.tensor(edge_index, dtype=torch.int64).T.contiguous())
     neg_edge_index = get_all_neg_index(edge_index, num_nodes)
 
     data = Data(
@@ -168,7 +170,7 @@ class Proteins(InMemoryDataset):
         data_list = []
         for i in range(len(adj)):
             num_nodes = adj[i].size(0)
-            edge_index = adj[i].nonzero().T
+            edge_index = EdgeIndex(adj[i].nonzero().T.contiguous())
             neg_edge_index = get_all_neg_index(edge_index, num_nodes)
             data_list.append(
                 Data(
@@ -204,7 +206,7 @@ class SBM(InMemoryDataset):
         data_list = []
         for i in range(len(adj)):
             num_nodes = adj[i].size(0)
-            edge_index = adj[i].nonzero().T
+            edge_index = EdgeIndex(adj[i].nonzero().T.contiguous())
             neg_edge_index = get_all_neg_index(edge_index, num_nodes)
             data_list.append(
                 Data(
@@ -228,7 +230,7 @@ def load_pygsp_graph(
     import pygsp
     graph = getattr(pygsp.graphs, name)(**kwargs)
     coord = torch.Tensor((graph.coords - graph.coords.mean(0)) / graph.coords.std(0))
-    edge_index = torch.Tensor(np.stack([graph.W.tocoo().row, graph.W.tocoo().col])).type(torch.long)
+    edge_index = EdgeIndex(np.stack([graph.W.tocoo().row, graph.W.tocoo().col]).astype(np.int64))
     return coord, edge_index
 
 
@@ -240,7 +242,7 @@ def create_cube_cloud(
     coord = torch.stack(torch.meshgrid(values, values, values, indexing='xy')).reshape(3, -1).T
     dist = torch.norm(coord - coord.unsqueeze(1), dim=-1) < radius
     dist.fill_diagonal_(0)
-    edge_index = dist.nonzero().T
+    edge_index = EdgeIndex(dist.nonzero().T.contiguous())
     return coord, edge_index
 
 
@@ -254,7 +256,7 @@ def create_pyramid():
     np.fill_diagonal(dist, np.inf)
     edge_index = np.column_stack(np.where(
         np.logical_or(dist <= 0.072, np.logical_and(0.4475 < dist, dist < 0.4490))))
-    coord, edge_index = torch.Tensor(coord), torch.Tensor(edge_index).t().long()
+    coord, edge_index = torch.Tensor(coord), EdgeIndex(np.ascontiguousarray(edge_index.T, dtype=np.int64))
     return coord, edge_index
 
 
@@ -262,7 +264,7 @@ def create_line(n_points=64):
     coord = torch.linspace(0, 1, steps=n_points).unsqueeze(1).repeat(1, 2)
     coord = (coord - coord.mean(0)) / coord.std(0)
     dist = ((coord.unsqueeze(1) - coord.unsqueeze(0)) ** 2).sum(dim=-1).fill_diagonal_(torch.inf)
-    edge_index = torch.argwhere(dist <= dist.min() + 0.001).T
+    edge_index = EdgeIndex(torch.argwhere(dist <= dist.min() + 0.001).T.contiguous())
     return coord, edge_index
 
 
@@ -279,7 +281,7 @@ def get_geometric_graph(
     elif name in ['Bunny', 'Grid2d', 'Torus']:
         coord, edge_index = load_pygsp_graph(name, **kwargs)
     else:
-        coord, edge_index = torch.load('./data/clouds/%s.pt' % name)
+        coord, edge_index = EdgeIndex(torch.load('./data/clouds/%s.pt' % name))
     return coord, edge_index
 
 
@@ -288,7 +290,7 @@ class GeometricGraphDataset(Dataset):
     def __init__(
         self,
         coord: torch.Tensor,
-        edge_index: torch.LongTensor,
+        edge_index: EdgeIndex,
         scale: Optional[float] = 1.0,
         length: Optional[int] = 1,
         density_rand_edge: Optional[float] = 1.0,
@@ -307,7 +309,7 @@ class GeometricGraphDataset(Dataset):
         row, col = self.edge_index[0], self.edge_index[1]
         self.edge_weight = torch.norm(self.coord[row] - self.coord[col], dim=-1)
 
-        self.full_edge_index = torch.ones(self.num_nodes, self.num_nodes).tril(-1).nonzero().T
+        self.full_edge_index = EdgeIndex(torch.ones(self.num_nodes, self.num_nodes).tril(-1).nonzero().T.contiguous())
         row, col = self.full_edge_index[0], self.full_edge_index[1]
         self.full_edge_weight = torch.norm(self.coord[row] - self.coord[col], dim=-1)
         self.cut_rand_edge = int(self.density_rand_edge * self.full_edge_index.size(1))
