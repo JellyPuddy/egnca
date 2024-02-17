@@ -54,7 +54,7 @@ class EncoderEGNCA(nn.Module):
         fire_rate: Optional[float] = 1.0,
         norm_type: Optional[str] = None,
         norm_cap: Optional[float] = None,
-        use_angles: Optional[bool] = True,
+        use_angles: Optional[bool] = False,
         relative_edges: Optional[bool] = False,
         dynamic_edges: Optional[bool] = False,
         edge_distance: Optional[float] = 0.15,
