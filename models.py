@@ -192,7 +192,6 @@ class FixedTargetGAE(pl.LightningModule):
         self.dynamic_edges = args.dynamic_edges if 'dynamic_edges' in args else False
         self.edge_distance = args.edge_distance if 'edge_distance' in args else 0.15
         self.edge_num = args.edge_num if 'edge_num' in args else None
-        self.persistence = args.persistence if 'persistence' in args else True
 
         self.encoder = EncoderEGNCA(
             coord_dim=self.target_coord.size(1),
@@ -251,8 +250,6 @@ class FixedTargetGAE(pl.LightningModule):
         loss_per_edge = self.mse(edge_weight, batch.rand_edge_weight)
         loss_per_graph = torch.stack([lpe.mean() for lpe in loss_per_edge.chunk(batch_size)])
         loss = loss_per_graph.mean()
-        if self.persistence:
-            self.pool.update(id_seeds, final_coord, final_node_feat, losses=loss_per_graph)
 
         # display & log
         print('%d \t %.6f \t %d \t %.6f \t %.2f' %

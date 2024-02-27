@@ -30,7 +30,6 @@ parser.add_argument('-de',  dest='dynamic_edges',  action='store_true',  default
 parser.add_argument('-an',  dest='angles',         action='store_true',  default=False, help='use angles as node features')
 parser.add_argument('-ed',  '--edge_distance',  type=float, default=None,   help='maximal edge distance for dynamic edges (will be applied after --edge_num, if both are set; will default to 0.15 if neither is set)')
 parser.add_argument('-en',  '--edge_num',       type=int,   default=None,   help='maximal number of edges for dynamic edges')
-parser.add_argument('-nps', dest='persistence',    action='store_false', default=True, help='do not train for persistence')
 
 parser.add_argument('-nd',  '--node_dim',       type=int,   default=16,     help='node feature dimension')
 parser.add_argument('-md',  '--message_dim',    type=int,   default=32,     help='hidden feature dimension')
