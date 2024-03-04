@@ -2,6 +2,8 @@ from typing import Optional
 import numpy as np
 import torch
 
+from utils.utils import get_anchor_coords
+
 
 def damage_coord(
     coord: Optional[torch.Tensor],
@@ -125,7 +127,9 @@ class GaussianSeedPool:
         fixed_init_coord: Optional[bool] = True,
         std_damage: Optional[bool] = 0.0,
         radius_damage: Optional[float] = None,
-        device: Optional[str] = 'cuda'
+        device: Optional[str] = 'cuda',
+        structured_seed: Optional[bool] = False,
+        anchor_feat: Optional[torch.Tensor] = None,
     ):
         assert std > 0.0
         assert std_damage >= 0
@@ -139,6 +143,7 @@ class GaussianSeedPool:
         self.std_damage = std_damage
         self.radius_damage = radius_damage
         self.device = device
+        self.structured_seed = structured_seed
 
         if fixed_init_coord:
             self.init_coord = torch.empty(num_nodes, coord_dim).normal_(std=std)
@@ -147,6 +152,15 @@ class GaussianSeedPool:
             self.init_coord = None
             self.pool_coord = torch.empty(pool_size, num_nodes, coord_dim).normal_(std=std)
         self.init_node_feat = torch.ones(num_nodes, node_dim)
+        if structured_seed:
+            assert anchor_feat is not None
+            self.anchor_feat = anchor_feat
+            assert node_dim >= coord_dim + 1
+            if fixed_init_coord:
+                # Initialze coords of anchor nodes
+                anchor_coords = get_anchor_coords(coord_dim)
+                # Replace the last coord_dim+1 coords with the anchor coords.
+                self.init_coord[-(coord_dim+1):] = anchor_coords
         self.pool_node_feat = self.init_node_feat.clone().unsqueeze(0).repeat(pool_size, 1, 1)
 
         self.pool_loss = torch.full((pool_size, ), torch.inf)
@@ -176,6 +190,8 @@ class GaussianSeedPool:
             coord[id_reset].normal_(std=self.std)
         else:
             coord[id_reset] = self.init_coord.clone().to(self.device)
+        if self.structured_seed:
+            node_feat[:, -(self.coord_dim+1):] = self.anchor_feat
 
         if self.sparse:
             coord = coord.view(-1, self.coord_dim)

@@ -30,6 +30,8 @@ parser.add_argument('-de',  dest='dynamic_edges',  action='store_true',  default
 parser.add_argument('-an',  dest='angles',         action='store_true',  default=False, help='use angles as node features')
 parser.add_argument('-ed',  '--edge_distance',  type=float, default=None,   help='maximal edge distance for dynamic edges (will be applied after --edge_num, if both are set; will default to 0.15 if neither is set)')
 parser.add_argument('-en',  '--edge_num',       type=int,   default=None,   help='maximal number of edges for dynamic edges')
+parser.add_argument('-ss',  dest='structured_seed', action='store_true', default=False, help='use structured seed')
+parser.add_argument('-uaf', dest='update_anchor_feat', action='store_true', default=False, help='allow anchor features to be updated')
 
 parser.add_argument('-nd',  '--node_dim',       type=int,   default=16,     help='node feature dimension')
 parser.add_argument('-md',  '--message_dim',    type=int,   default=32,     help='hidden feature dimension')
@@ -67,7 +69,7 @@ if args.norm_type == 'none': args.norm_type = None
 if args.edge_distance is None and args.edge_num is None: args.edge_distance = 0.15
 print(args)
 
-target_coord, edge_index = get_geometric_graph(args.dataset)
+target_coord, edge_index = get_geometric_graph(args.dataset, structured_seed=args.structured_seed)
 dataset = GeometricGraphDataset(
     coord=target_coord,
     edge_index=edge_index,
@@ -104,6 +106,8 @@ with open(trainer.logger.log_dir + '/commandline.txt', 'w') as f:
     f.write(' '.join(sys.argv))
 with open(trainer.logger.log_dir + '/args.txt', 'w') as f:
     json.dump(args.__dict__, f, indent=2, default=lambda o: '<not serializable>')
+
+# TODO add random seed
 
 model = FixedTargetGAE(args)
 tik = time.time()

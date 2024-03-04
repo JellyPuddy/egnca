@@ -242,6 +242,7 @@ def compute_edge_index(
     n_neighbours: Optional[int] = None,
     in_step: Optional[bool] = False
 ):
+    # TODO handle structured seed
     assert n_neighbours or distance
 
     if not relative_edges:
@@ -281,3 +282,98 @@ def compute_edge_index(
     # Move edge_index to the same device as init_coord
     edge_index = edge_index.to(coord.device)
     return EdgeIndex(edge_index)
+
+def get_anchor_coords(
+    coord_dim: int,
+):
+    if coord_dim == 2:
+        # Add anchor nodes: equilateral triangle
+        return torch.tensor([[1, 0], [-0.5, 0.5 * 3 ** 0.5], [-0.5, -0.5 * 3 ** 0.5]])
+    else:
+        # Add anchor nodes: tetrahedron
+        return torch.tensor([[1, 0, -0.5 * 2 ** 0.5], [-1, 0, -0.5 * 2 ** 0.5], [0, 1, 0.5 * 2 ** 0.5], [0, -1, 0.5 * 2 ** 0.5]])
+
+# Adapted from https://github.com/pyg-team/pytorch_geometric/blob/caf5f57bf10f9b697b418ea7ec50594ee7a21b73/torch_geometric/nn/models/dimenet.py#L413-L433
+def triplets(
+    edge_index: EdgeIndex,
+    num_nodes,
+):
+    row, col = edge_index  # i->j
+
+    # Create a dense adjacency matrix
+    adj_matrix = torch.zeros((num_nodes, num_nodes), dtype=torch.bool, device=edge_index.device)
+    adj_matrix[row, col] = 1
+
+    # Get the row-wise neighbors for each edge
+    adj_row = adj_matrix.index_select(0, row)
+
+    # Calculate the number of triplets for each edge
+    num_triplets = adj_row.sum(dim=1, dtype=torch.long)
+
+    # Node indices (k->i->j) for triplets.
+    idx_i = row.repeat_interleave(num_triplets)
+    idx_j = col.repeat_interleave(num_triplets)
+    idx_k = adj_row.nonzero(as_tuple=True)[1]
+    mask = idx_j != idx_k  # Remove j == k triplets.
+    # idx_i, idx_j, idx_k = idx_i[mask], idx_j[mask], idx_k[mask]
+    idx_i, idx_j, idx_k = idx_i.index_select(0, mask.nonzero(as_tuple=True)[0]), idx_j.index_select(0, mask.nonzero(as_tuple=True)[0]), idx_k.index_select(0, mask.nonzero(as_tuple=True)[0])
+
+    return idx_i, idx_j, idx_k
+
+def calculate_angles(
+    coord: torch.Tensor,
+    edge_index: EdgeIndex,
+    num_nodes: int,
+    return_indices: Optional[bool] = False
+):
+    # TODO ignore anchors
+    idx_i, idx_j, idx_k = triplets(
+        edge_index, num_nodes=num_nodes)
+
+    coord_ik, coord_ij = coord.index_select(0, idx_k) - coord.index_select(0, idx_i), coord.index_select(0, idx_j) - coord.index_select(0, idx_i)
+
+    dot_product = (coord_ij * coord_ik).sum(dim=-1)
+    norm_product = (coord_ij.norm(dim=-1) * coord_ik.norm(dim=-1)).clamp(min=1e-5)
+    eps = torch.tensor(1e-7, device=coord.device)
+    angle = torch.arccos((dot_product / (norm_product)).clamp(-1 + eps, 1 - eps)) / torch.pi
+    
+    if return_indices:
+        return angle, (idx_i, idx_j, idx_k)
+
+    return angle
+
+def local_loss(
+    coord_1: torch.Tensor,
+    coord_2: torch.Tensor,
+    edge_index: EdgeIndex,
+):
+    if coord_1.shape != coord_2.shape:
+        if coord_1.shape[0] % coord_2.shape[0] == 0:
+            coord_2 = coord_2.repeat(coord_1.shape[0] // coord_2.shape[0], 1)
+        else:
+            raise ValueError("The number of nodes in the two graphs must be equal or one must be a multiple of the other")
+
+    # Compute the distances between the nodes and their neighbors
+    dist_1 = torch.norm(coord_1[edge_index[0]] - coord_1[edge_index[1]], dim=-1)
+    dist_2 = torch.norm(coord_2[edge_index[0]] - coord_2[edge_index[1]], dim=-1)
+    
+    # Compute the angles between each triplet of nodes
+    angle_1 = calculate_angles(coord_1, edge_index, coord_1.size(0))
+    angle_2 = calculate_angles(coord_2, edge_index, coord_2.size(0))
+    
+    # Compute the loss
+    dist_loss = ((dist_1 - dist_2) ** 2).mean() ** 0.5
+    angle_loss = ((angle_1 - angle_2) ** 2).mean() ** 0.5
+    return dist_loss, angle_loss
+
+def get_fourrier_features(
+    number: torch.Tensor,
+    n_features: int = 8,
+):
+    if number.ndim == 1:
+        number = number.unsqueeze(-1)
+    
+    # Compute the fourrier features
+    B = torch.normal(0, 2, size=(n_features, 1), device=number.device, dtype=number.dtype)
+    fourrier_features = torch.sin(2 * np.pi * number @ B.T)
+    return fourrier_features

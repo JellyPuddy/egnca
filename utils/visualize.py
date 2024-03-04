@@ -196,7 +196,8 @@ def coord2scatter(
     zero_center: Optional[bool] = True,
     transparent: Optional[bool] = False,
     font_size: Optional[int] = 15,
-    ax: Optional[plt.Axes] = None
+    ax: Optional[plt.Axes] = None,
+    show_anchors: Optional[bool] = False
 ):
     assert coord.ndim == 2 or coord.ndim == 3
     plt.rcParams.update({'font.size': font_size})
@@ -204,12 +205,13 @@ def coord2scatter(
     if isinstance(coord, torch.Tensor):
         coord = coord.detach().cpu().numpy()
     coord = coord - coord.mean(0, keepdims=True) if zero_center else coord
+    color = ['blue' for _ in range(coord.shape[0] - coord.shape[1] - 1)] + ['red' for _ in range(coord.shape[1] + 1)] if show_anchors else 'C0'
     if coord.shape[1] == 2:
         if ax is None:
             fig, ax = plt.subplots()
             fig.tight_layout()
         ax.set_title(title)
-        ax.scatter(coord[:, 0], coord[:, 1], s=node_size)
+        ax.scatter(coord[:, 0], coord[:, 1], s=node_size, c=color)
         if box_dim is not None:
             ax.set_xlim([-box_dim, box_dim])
             ax.set_ylim([-box_dim, box_dim])
@@ -229,7 +231,7 @@ def coord2scatter(
             fig.tight_layout()
             ax = fig.add_subplot(projection='3d')
         ax.set_title(title)
-        ax.scatter(coord[:, 0], coord[:, 1], coord[:, 2], s=node_size)
+        ax.scatter(coord[:, 0], coord[:, 1], coord[:, 2], s=node_size, c=color)
         if box_dim is not None:
             ax.axes.set_xlim3d(left=-box_dim, right=box_dim)
             ax.axes.set_ylim3d(bottom=-box_dim, top=box_dim)

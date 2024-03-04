@@ -2,6 +2,8 @@ from typing import Optional, List, Tuple
 from torch import nn
 import torch
 
+from utils.utils import calculate_angles, get_fourrier_features, triplets
+
 def aggregated_sum(
     data: torch.Tensor,
     index: torch.LongTensor,
@@ -96,7 +98,7 @@ class EGC(nn.Module):
 
         if use_angles:
             self.edge_mlp2 = nn.Sequential(
-                nn.Linear(node_dim + node_dim + edge_attr_dim + 1, message_dim),
+                nn.Linear(node_dim + node_dim + edge_attr_dim + 8, message_dim),
                 act,
                 nn.Linear(message_dim, message_dim),
                 act
@@ -187,37 +189,6 @@ class EGC(nn.Module):
             out = self.coord2radial_dense(coord, edge_index)
         return out
 
-    # Adapted from https://github.com/pyg-team/pytorch_geometric/blob/caf5f57bf10f9b697b418ea7ec50594ee7a21b73/torch_geometric/nn/models/dimenet.py#L413-L433
-    def triplets(
-        self,
-        edge_index,
-        num_nodes,
-    ):
-        row, col = edge_index  # j->i
-
-        # Create a dense adjacency matrix
-        adj_matrix = torch.zeros((num_nodes, num_nodes), dtype=torch.bool, device=edge_index.device)
-        adj_matrix[row, col] = 1
-
-        # Get the row-wise neighbors for each edge
-        adj_row = adj_matrix[row]
-
-        # Calculate the number of triplets for each edge
-        num_triplets = adj_row.sum(dim=1, dtype=torch.long)
-
-        # Node indices (k->j->i) for triplets.
-        idx_i = col.repeat_interleave(num_triplets)
-        idx_j = row.repeat_interleave(num_triplets)
-        idx_k = adj_row.nonzero(as_tuple=True)[1]
-        mask = idx_i != idx_k  # Remove i == k triplets.
-        idx_i, idx_j, idx_k = idx_i[mask], idx_j[mask], idx_k[mask]
-
-        # Edge indices (k-j, j->i) for triplets.
-        idx_kj = adj_matrix[idx_j, idx_k].nonzero(as_tuple=True)[0]
-        idx_ji = adj_matrix[idx_k, idx_i].nonzero(as_tuple=True)[0]
-
-        return col, row, idx_i, idx_j, idx_k, idx_kj, idx_ji
-
     def edge_model_sparse(
         self,
         node_feat: torch.Tensor,
@@ -249,25 +220,22 @@ class EGC(nn.Module):
         edge_weight: Optional[torch.Tensor] = None,
         edge_attr: Optional[torch.Tensor] = None
     ):
-        i, j, idx_i, idx_j, idx_k, idx_ki, idx_ij = self.triplets(
-            edge_index, num_nodes=node_feat.size(0))
+        angle, (idx_i, idx_j, idx_k) = calculate_angles(coord, edge_index, node_feat.size(0), True)
 
-        # Calculate angles.
-        coord_ik, coord_ji = coord[idx_i] - coord[idx_k], coord[idx_j] - coord[idx_i]
-        a = (coord_ji * coord_ik).sum(dim=-1)
-        b = torch.cross(coord_ji, coord_ik).norm(dim=-1)
-        angle = torch.atan2(b, a)
-
-        edge_feat2 = torch.cat([node_feat[idx_j], node_feat[idx_k], angle.unsqueeze(-1)], dim=1)
-
+        transformed_angle = get_fourrier_features(angle)
+        edge_feat2 = torch.cat([node_feat[idx_j], node_feat[idx_k], transformed_angle], dim=1)
         out = self.edge_mlp2(edge_feat2)
         out_agg = aggregated_sum_2_indices(out, idx_i, idx_j, coord_radial.size(0), mean=self.aggr_coord == 'mean')
+
+        # transformed_coord_radial = get_fourrier_features(coord_radial)
 
         if edge_attr is not None:
             assert edge_attr.size(1) == self.edge_attr_dim
             edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, coord_radial, edge_attr], dim=1)
+            # edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, transformed_coord_radial, edge_attr], dim=1)
         else:
             edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, coord_radial], dim=1)
+            # edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, transformed_coord_radial], dim=1)
 
         out = self.edge_mlp(edge_feat)
         if edge_weight is not None:
