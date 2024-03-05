@@ -1,3 +1,5 @@
+import os
+import random
 from sklearn.metrics import confusion_matrix
 from typing import Optional, List, Union
 import numpy as np
@@ -377,3 +379,17 @@ def get_fourrier_features(
     B = torch.normal(0, 2, size=(n_features, 1), device=number.device, dtype=number.dtype)
     fourrier_features = torch.sin(2 * np.pi * number @ B.T)
     return fourrier_features
+
+def init_random_seeds(seed: int = 42):
+    """
+    Seed all random generators and enforce deterministic algorithms to
+    guarantee reproducible results (may limit performance).
+    """
+    seed = seed % 2 ** 32  # some only accept 32bit seed
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.benchmark = False
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"

@@ -10,6 +10,8 @@ import time
 import sys
 import os
 
+from utils.utils import init_random_seeds
+
 
 parser = argparse.ArgumentParser()
 
@@ -19,6 +21,7 @@ parser.add_argument('-sc',  '--scale',          type=float, default=1.0,    help
 parser.add_argument('-dre', '--dens_rand_edge', type=float, default=1.0,    help='density of rand edges to sample')
 parser.add_argument('-ts',  '--training_steps', type=int,   default=100000, help='number of training steps')
 parser.add_argument('-pat', '--patience',       type=int,   default=5000,   help='early stopping patience (tr. steps)')
+parser.add_argument('-s',   '--seed',           type=int,   default=None,   help='random seed')
 
 parser.add_argument('-ps',  '--pool_size',      type=int,   default=256,    help='pool size')
 parser.add_argument('-bsc', '--batch_sch',      type=int,   default=[0, 8], help='batch size schedule', nargs='+')
@@ -68,6 +71,9 @@ if args.norm_type == 'none': args.norm_type = None
 # Make sure the default value for edge_distance is set only if edge_num is not set
 if args.edge_distance is None and args.edge_num is None: args.edge_distance = 0.15
 print(args)
+
+if args.seed is not None:
+    init_random_seeds(args.seed)
 
 target_coord, edge_index = get_geometric_graph(args.dataset, structured_seed=args.structured_seed)
 dataset = GeometricGraphDataset(
