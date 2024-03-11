@@ -227,7 +227,8 @@ class SBM(InMemoryDataset):
 
 def load_pygsp_graph(
     name: str,
-    structured_seed: Optional[bool] = False,
+    anchor_coords: Optional[torch.Tensor] = None,
+    anchor_dist: Optional[float] = 0.25,
     **kwargs
 ):
     import pygsp
@@ -236,21 +237,20 @@ def load_pygsp_graph(
 
     coord_dim = coord.size(1)
 
-    if structured_seed:
+    if anchor_coords is not None:
         # Add anchor points
-        anchor_coords = get_anchor_coords(coord_dim)
         coord = torch.cat([coord, anchor_coords], dim=0)
 
     edge_index = EdgeIndex(np.stack([graph.W.tocoo().row, graph.W.tocoo().col]).astype(np.int64))
 
-    if structured_seed:
+    if anchor_coords is not None:
         # Add an edge from each anchor to each node
         anchor_edges = torch.tensor([[i, j] for i in range(graph.N) for j in range(graph.N, graph.N + coord_dim + 1)])
         # Add the reverse edges
         anchor_edges = torch.cat([anchor_edges, anchor_edges.flip(1)], dim=0)
-        # Keep only those edges with a distance smaller than 0.15
+        # Keep only those edges with a distance smaller than anchor_dist
         dist = torch.norm(coord[anchor_edges[:, 0]] - coord[anchor_edges[:, 1]], dim=-1)
-        anchor_edges = anchor_edges[dist < 0.15]
+        anchor_edges = anchor_edges[dist < anchor_dist]
         edge_index = EdgeIndex(torch.cat([edge_index, anchor_edges.T], dim=1))
 
     return coord, edge_index
@@ -259,35 +259,36 @@ def load_pygsp_graph(
 def create_cube_cloud(
     length: Optional[int] = 8,
     radius: Optional[float] = 0.15,
-    structured_seed: Optional[bool] = False
+    anchor_coords: Optional[torch.Tensor] = None,
+    anchor_dist: Optional[float] = 0.25
 ):
     values = torch.linspace(0, 1, steps=length)
     coord = torch.stack(torch.meshgrid(values, values, values, indexing='xy')).reshape(3, -1).T
     dist = torch.norm(coord - coord.unsqueeze(1), dim=-1) < radius
     dist.fill_diagonal_(0)
 
-    if structured_seed:
+    if anchor_coords is not None:
         # Add anchor points
-        anchor_coords = get_anchor_coords(3)
         coord = torch.cat([coord, anchor_coords], dim=0)
 
     edge_index = EdgeIndex(dist.nonzero().T.contiguous())
 
-    if structured_seed:
+    if anchor_coords is not None:
         # Add an edge from each anchor to each node
         anchor_edges = torch.tensor([[i, j] for i in range(coord.size(0) - 4) for j in range(coord.size(0) - 4, coord.size(0))])
         # Add the reverse edges
         anchor_edges = torch.cat([anchor_edges, anchor_edges.flip(1)], dim=0)
-        # Keep only those edges with a distance smaller than radius
+        # Keep only those edges with a distance smaller than anchor_dist
         dist = torch.norm(coord[anchor_edges[:, 0]] - coord[anchor_edges[:, 1]], dim=-1)
-        anchor_edges = anchor_edges[dist < radius]
+        anchor_edges = anchor_edges[dist < anchor_dist]
         edge_index = EdgeIndex(torch.cat([edge_index, anchor_edges.T], dim=1))
 
     return coord, edge_index
 
 
 def create_pyramid(
-    structured_seed: Optional[bool] = False
+    anchor_coords: Optional[torch.Tensor] = None,
+    anchor_dist: Optional[float] = 0.25
 ):
     values = np.linspace(0, 1, num=16)
     x, y, z = np.meshgrid(values, values, values, indexing='xy')
@@ -297,48 +298,46 @@ def create_pyramid(
     dist = np.sum((coord[:, None] - coord[None, :]) ** 2, axis=-1)
     np.fill_diagonal(dist, np.inf)
 
-    if structured_seed:
+    if anchor_coords is not None:
         # Add anchor points
-        anchor_coords = get_anchor_coords(3)
         coord = np.vstack([coord, anchor_coords])
 
     edge_index = np.column_stack(np.where(
         np.logical_or(dist <= 0.072, np.logical_and(0.4475 < dist, dist < 0.4490))))
     coord, edge_index = torch.Tensor(coord), EdgeIndex(np.ascontiguousarray(edge_index.T, dtype=np.int64))
 
-    if structured_seed:
+    if anchor_coords is not None:
         # Add an edge from each anchor to each node
         anchor_edges = torch.tensor([[i, j] for i in range(coord.size(0) - 4) for j in range(coord.size(0) - 4, coord.size(0))])
         # Add the reverse edges
         anchor_edges = torch.cat([anchor_edges, anchor_edges.flip(1)], dim=0)
-        # Keep only those edges with a distance smaller than 0.15
+        # Keep only those edges with a distance smaller than anchor_dist
         dist = torch.norm(coord[anchor_edges[:, 0]] - coord[anchor_edges[:, 1]], dim=-1)
-        anchor_edges = anchor_edges[dist < 0.15]
+        anchor_edges = anchor_edges[dist < anchor_dist]
         edge_index = EdgeIndex(torch.cat([edge_index, anchor_edges.T], dim=1))
 
     return coord, edge_index
 
 
-def create_line(n_points=64, structured_seed=False):
+def create_line(n_points=64, anchor_coords=None, anchor_dist=0.25):
     coord = torch.linspace(0, 1, steps=n_points).unsqueeze(1).repeat(1, 2)
     coord = (coord - coord.mean(0)) / coord.std(0)
     dist = ((coord.unsqueeze(1) - coord.unsqueeze(0)) ** 2).sum(dim=-1).fill_diagonal_(torch.inf)
 
-    if structured_seed:
+    if anchor_coords is not None:
         # Add anchor points
-        anchor_coords = get_anchor_coords(2)
         coord = torch.cat([coord, anchor_coords], dim=0)
 
     edge_index = EdgeIndex(torch.argwhere(dist <= dist.min() + 0.001).T.contiguous())
 
-    if structured_seed:
+    if anchor_coords is not None:
         # Add an edge from each anchor to each node
         anchor_edges = torch.tensor([[i, j] for i in range(coord.size(0) - 3) for j in range(coord.size(0) - 3, coord.size(0))])
         # Add the reverse edges
         anchor_edges = torch.cat([anchor_edges, anchor_edges.flip(1)], dim=0)
-        # Keep only those edges with a distance smaller than 0.15
+        # Keep only those edges with a distance smaller than anchor_dist
         dist = torch.norm(coord[anchor_edges[:, 0]] - coord[anchor_edges[:, 1]], dim=-1)
-        anchor_edges = anchor_edges[dist < 0.15]
+        anchor_edges = anchor_edges[dist < anchor_dist]
         edge_index = EdgeIndex(torch.cat([edge_index, anchor_edges.T], dim=1))
 
     return coord, edge_index
@@ -346,21 +345,27 @@ def create_line(n_points=64, structured_seed=False):
 
 def get_geometric_graph(
     name: str,
-    structured_seed: Optional[bool] = False,
+    anchor_structure: Optional[torch.Tensor] = None,
+    anchor_dist: Optional[float] = 0.25,
     **kwargs
 ):
+    dimensions = 2 if name in ['Grid2d', 'Line'] else 3
+    anchor_coords = get_anchor_coords(anchor_structure, dimensions)
+
     if name == 'Line':
-        coord, edge_index = create_line(structured_seed=structured_seed)
+        coord, edge_index = create_line(anchor_coords=anchor_coords, anchor_dist=anchor_dist)
     elif name == 'Cube':
-        coord, edge_index = create_cube_cloud(structured_seed=structured_seed)
+        coord, edge_index = create_cube_cloud(anchor_coords=anchor_coords, anchor_dist=anchor_dist)
     elif name == 'Pyramid':
-        coord, edge_index = create_pyramid(structured_seed=structured_seed)
+        coord, edge_index = create_pyramid(anchor_coords=anchor_coords, anchor_dist=anchor_dist)
     elif name in ['Bunny', 'Grid2d', 'Torus']:
-        coord, edge_index = load_pygsp_graph(name, structured_seed, **kwargs)
+        coord, edge_index = load_pygsp_graph(name, anchor_coords, anchor_dist=anchor_dist, **kwargs)
     else:
+        if anchor_coords is not None:
+            raise NotImplementedError('Structured seeds are not (yet) supported for this graph.')
         coord, edge_index = torch.load('./data/clouds/%s.pt' % name)
         edge_index = EdgeIndex(edge_index)
-    return coord, edge_index
+    return coord, edge_index, anchor_coords
 
 
 class GeometricGraphDataset(Dataset):

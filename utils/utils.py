@@ -286,14 +286,27 @@ def compute_edge_index(
     return EdgeIndex(edge_index)
 
 def get_anchor_coords(
+    anchor_structure: str,
     coord_dim: int,
 ):
-    if coord_dim == 2:
-        # Add anchor nodes: equilateral triangle
-        return torch.tensor([[1, 0], [-0.5, 0.5 * 3 ** 0.5], [-0.5, -0.5 * 3 ** 0.5]])
+    if anchor_structure is None:
+        return None
+    elif anchor_structure == 'simplex':
+        if coord_dim == 2:
+            # Add anchor nodes: equilateral triangle
+            return torch.tensor([[1, 0], [-0.5, 0.5 * 3 ** 0.5], [-0.5, -0.5 * 3 ** 0.5]])
+        else:
+            # Add anchor nodes: tetrahedron
+            return torch.tensor([[1, 0, -0.5 * 2 ** 0.5], [-1, 0, -0.5 * 2 ** 0.5], [0, 1, 0.5 * 2 ** 0.5], [0, -1, 0.5 * 2 ** 0.5]])
+    elif anchor_structure == 'corners':
+        if coord_dim == 2:
+            return torch.Tensor([[1, 1], [1, -1], [-1, 1], [-1, -1]])
+        elif coord_dim == 3:
+            return torch.Tensor([[1, 1, 1], [1, -1, 1], [-1, 1, 1], [-1, -1, 1], [1, 1, -1], [1, -1, -1], [-1, 1, -1], [-1, -1, -1]])
+        else:
+            raise NotImplementedError("The corners anchor structure is only implemented for 2D and 3D coordinates")
     else:
-        # Add anchor nodes: tetrahedron
-        return torch.tensor([[1, 0, -0.5 * 2 ** 0.5], [-1, 0, -0.5 * 2 ** 0.5], [0, 1, 0.5 * 2 ** 0.5], [0, -1, 0.5 * 2 ** 0.5]])
+        raise ValueError("Invalid anchor structure. Must be either 'simplex' or 'corners'")
 
 # Adapted from https://github.com/pyg-team/pytorch_geometric/blob/caf5f57bf10f9b697b418ea7ec50594ee7a21b73/torch_geometric/nn/models/dimenet.py#L413-L433
 def triplets(
@@ -334,10 +347,14 @@ def calculate_angles(
 
     coord_ik, coord_ij = coord.index_select(0, idx_k) - coord.index_select(0, idx_i), coord.index_select(0, idx_j) - coord.index_select(0, idx_i)
 
-    dot_product = (coord_ij * coord_ik).sum(dim=-1)
-    norm_product = (coord_ij.norm(dim=-1) * coord_ik.norm(dim=-1)).clamp(min=1e-5)
-    eps = torch.tensor(1e-7, device=coord.device)
-    angle = torch.arccos((dot_product / (norm_product)).clamp(-1 + eps, 1 - eps)) / torch.pi
+    # dot_product = (coord_ij * coord_ik).sum(dim=-1)
+    # norm_product = (coord_ij.norm(dim=-1) * coord_ik.norm(dim=-1)).clamp(min=1e-5)
+    # eps = torch.tensor(1e-7, device=coord.device)
+    # angle = torch.arccos((dot_product / (norm_product)).clamp(-1 + eps, 1 - eps)) / torch.pi
+    angle = 2 * torch.atan2(
+        torch.norm(coord_ik * coord_ij, dim=1),
+        torch.norm(coord_ik, dim=1) * torch.norm(coord_ij, dim=1)
+    ) / torch.pi
     
     if return_indices:
         return angle, (idx_i, idx_j, idx_k)

@@ -62,7 +62,9 @@ class EncoderEGNCA(nn.Module):
         structured_seed: Optional[bool] = False,
         scale: Optional[float] = 1.0,
         update_anchor_feat: Optional[bool] = False,
-        anchor_feat: Optional[torch.Tensor] = None
+        anchor_feat: Optional[torch.Tensor] = None,
+        anchor_coords: Optional[torch.Tensor] = None,
+        ffa: Optional[bool] = False
     ):
         super(EncoderEGNCA, self).__init__()
         assert norm_type is None or norm_type == 'nn' or norm_type == 'pn'
@@ -80,6 +82,8 @@ class EncoderEGNCA(nn.Module):
         self.scale = scale
         self.update_anchor_feat = update_anchor_feat
         self.anchor_feat = anchor_feat
+        self.anchor_coords = anchor_coords
+        self.ffa = ffa
 
         if norm_type == 'nn':
             self.normalise = NodeNorm(root_power=2.0 if norm_cap is None else norm_cap)
@@ -98,7 +102,8 @@ class EncoderEGNCA(nn.Module):
                 is_residual=is_residual,
                 has_attention=has_attention,
                 has_coord_act=has_coord_act,
-                use_angles=use_angles))
+                use_angles=use_angles,
+                ffa=ffa))
         self.egnn = EGNN(layers)
 
     @property
@@ -118,7 +123,7 @@ class EncoderEGNCA(nn.Module):
         coord = torch.empty(num_nodes, self.coord_dim, dtype=dtype, device=device).normal_(self.std)
 
         if self.structured_seed:
-            anchor_coords = get_anchor_coords(self.coord_dim) * self.scale
+            anchor_coords = self.anchor_coords * self.scale
             coord[-anchor_coords.size(0):] = anchor_coords
 
         return coord
@@ -135,8 +140,8 @@ class EncoderEGNCA(nn.Module):
             node_feat = torch.ones(num_nodes, self.node_dim, dtype=dtype, device=device)
         
         if self.structured_seed:
-            # Replace the last coord_dim+1 nodes with the anchor nodes
-            node_feat[-(self.coord_dim+1):] = self.anchor_feat
+            # Replace the last nodes with the anchor nodes
+            node_feat[-self.anchor_feat.size(0):] = self.anchor_feat
         return node_feat
 
     def stochastic_update(
@@ -158,18 +163,18 @@ class EncoderEGNCA(nn.Module):
             mask = (torch.rand(out_coord.size(0), 1) <= self.fire_rate).byte().to(in_coord.device)
             # Make the mask 0 for the anchor nodes
             if self.structured_seed and not self.update_anchor_feat:
-                mask[-(self.coord_dim+1):] = 0
+                mask[-self.anchor_feat.size(0):] = 0
             out_node_feat = (out_node_feat * mask) + (in_node_feat * (1 - mask))
             if self.structured_seed:
-                mask[-(self.coord_dim+1):] = 0
+                mask[-self.anchor_feat.size(0):] = 0
             out_coord = (out_coord * mask) + (in_coord * (1 - mask))
         elif self.structured_seed:
-            out_coord[-(self.coord_dim+1):] = in_coord[-(self.coord_dim+1):]
-            anchor_mask = torch.zeros(self.coord_dim+1, self.node_dim).byte().to(in_coord.device)
+            out_coord[-self.anchor_feat.size(0):] = in_coord[-self.anchor_feat.size(0):]
+            anchor_mask = torch.zeros(self.anchor_feat.size(0), self.node_dim).byte().to(in_coord.device)
             # Possibly update the anchor features
             if self.update_anchor_feat:
                 anchor_mask += 1
-            out_node_feat[-(self.coord_dim+1):] = (out_node_feat[-(self.coord_dim+1):] * anchor_mask) + (in_node_feat[-(self.coord_dim+1):] * (1 - anchor_mask))
+            out_node_feat[-self.anchor_feat.size(0):] = (out_node_feat[-self.anchor_feat.size(0):] * anchor_mask) + (in_node_feat[-self.anchor_feat.size(0):] * (1 - anchor_mask))
         assert not torch.isnan(out_node_feat).any()
         assert not torch.isnan(out_coord).any()
         return out_coord, out_node_feat
@@ -213,10 +218,11 @@ class FixedTargetGAE(pl.LightningModule):
         super().__init__()
 
         self.structured_seed = args.structured_seed if 'structured_seed' in args else False
+        self.anchor_structure = args.anchor_structure if 'anchor_structure' in args else None
 
         # load target geometric graph as model attribute
         from data.datasets import get_geometric_graph
-        target_coord, edge_index = get_geometric_graph(args.dataset, structured_seed=self.structured_seed)
+        target_coord, edge_index, anchor_coords = get_geometric_graph(args.dataset, anchor_structure=self.anchor_structure)
         self.register_buffer('target_coord', target_coord * args.scale)
         self.register_buffer('edge_index', edge_index)
 
@@ -228,11 +234,12 @@ class FixedTargetGAE(pl.LightningModule):
         self.edge_distance = args.edge_distance if 'edge_distance' in args else 0.15
         self.edge_num = args.edge_num if 'edge_num' in args else None
         self.update_anchor_feat = args.update_anchor_feat if 'update_anchor_feat' in args else False
-
-        if self.structured_seed:
+        self.loss_fn = args.loss if 'loss' in args else 'mse'
+        self.ffa = args.fourrier_feat_angles if 'fourrier_feat_angles' in args else False
+        if self.structured_seed and anchor_coords is not None:
+            self.register_buffer('anchor_coords', anchor_coords * args.scale)
             # Initialize features of anchor nodes. The features are learnable parameters.
-            anchor_feat = torch.nn.Parameter(torch.empty(self.target_coord.size(1) + 1, args.node_dim, dtype=torch.float32).normal_(args.std))
-            self.register_parameter('anchor_feat', anchor_feat)
+            self.register_parameter('anchor_feat', torch.nn.Parameter(torch.empty(self.anchor_coords.size(0), args.node_dim, dtype=torch.float32).normal_(args.std)))
 
         self.encoder = EncoderEGNCA(
             coord_dim=self.target_coord.size(1),
@@ -254,7 +261,9 @@ class FixedTargetGAE(pl.LightningModule):
             structured_seed=self.structured_seed,
             scale=args.scale,
             update_anchor_feat=self.update_anchor_feat,
-            anchor_feat=self.anchor_feat if self.structured_seed else None)
+            anchor_feat=self.anchor_feat if self.structured_seed else None,
+            anchor_coords=self.anchor_coords if self.structured_seed else None,
+            ffa=self.ffa)
 
         self.pool = GaussianSeedPool(
             pool_size=args.pool_size,
@@ -267,7 +276,8 @@ class FixedTargetGAE(pl.LightningModule):
             device=args.device,
             fixed_init_coord=True,
             structured_seed=self.structured_seed,
-            anchor_feat=self.anchor_feat if self.structured_seed else None)
+            anchor_feat=self.anchor_feat if self.structured_seed else None,
+            anchor_coords=self.anchor_coords if self.structured_seed else None)
 
         self.register_buffer('init_coord', self.pool.init_coord.clone())
         self.mse = nn.MSELoss(reduction='none')
@@ -293,17 +303,27 @@ class FixedTargetGAE(pl.LightningModule):
         final_coord, final_node_feat = self.encoder(
             edge_index, init_coord, init_node_feat, n_steps=n_steps, n_nodes=batch.n_nodes)
 
-        edge_weight = torch.norm(final_coord[batch.rand_edge_index[0]] - final_coord[batch.rand_edge_index[1]], dim=-1)
-        loss_per_edge = self.mse(edge_weight, batch.rand_edge_weight)
-        loss_per_graph = torch.stack([lpe.mean() for lpe in loss_per_edge.chunk(batch_size)])
-        old_loss = loss_per_graph.mean()
-        
-        dist_loss, angle_loss = local_loss(final_coord, self.target_coord, edge_index)
-        loss = dist_loss + angle_loss
+        if self.loss_fn == 'mse':
+            edge_weight = torch.norm(final_coord[batch.rand_edge_index[0]] - final_coord[batch.rand_edge_index[1]], dim=-1)
+            loss_per_edge = self.mse(edge_weight, batch.rand_edge_weight)
+            loss_per_graph = torch.stack([lpe.mean() for lpe in loss_per_edge.chunk(batch_size)])
+            loss = loss_per_graph.mean()
+            loss_log = f'{loss:.6f}'
+        elif self.loss_fn == 'local':
+            with torch.no_grad():
+                edge_weight = torch.norm(final_coord[batch.rand_edge_index[0]] - final_coord[batch.rand_edge_index[1]], dim=-1)
+                loss_per_edge = self.mse(edge_weight, batch.rand_edge_weight)
+                loss_per_graph = torch.stack([lpe.mean() for lpe in loss_per_edge.chunk(batch_size)])
+                old_loss = loss_per_graph.mean()
+            dist_loss, angle_loss = local_loss(final_coord, self.target_coord, edge_index)
+            loss = dist_loss + angle_loss
+            loss_log = f'{dist_loss:.6f} + {angle_loss:.6f} = {loss:.6f} ({old_loss:.6f})'
+        else:
+            raise ValueError('Invalid loss function')
 
         # display & log
-        print('%d \t %.6f + %.6f = %.6f (%.6f) \t %d \t %.6f \t %.2f' %
-              (self.current_epoch, dist_loss, angle_loss, loss, old_loss, batch_size,
+        print('%d \t %s \t %d \t %.6f \t %.2f' %
+              (self.current_epoch, loss_log, batch_size,
                self.trainer.optimizers[0].param_groups[0]['lr'], self.pool.avg_reps))
         self.log('loss', loss, on_step=True, on_epoch=False, batch_size=batch_size)
         return loss

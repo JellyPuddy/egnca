@@ -63,7 +63,8 @@ class EGC(nn.Module):
         aggr_coord: Optional[str] = 'mean',
         aggr_hidden:  Optional[str] = 'sum',
         has_coord_act: Optional[bool] = False,
-        use_angles: Optional[bool] = False
+        use_angles: Optional[bool] = False,
+        ffa: Optional[bool] = False
     ):
         super(EGC, self).__init__()
         assert aggr_coord == 'mean' or aggr_coord == 'sum'
@@ -84,8 +85,10 @@ class EGC(nn.Module):
         self.aggr_hidden = aggr_hidden
         self.has_coord_act = has_coord_act
         self.use_angles = use_angles
+        self.ffa = ffa
 
         expressiveness_dim = message_dim if use_angles else 0
+        angle_dim = 8 if ffa else 1
 
         act = {'tanh': nn.Tanh(), 'lrelu': nn.LeakyReLU(), 'silu': nn.SiLU()}[act_name]
 
@@ -98,7 +101,7 @@ class EGC(nn.Module):
 
         if use_angles:
             self.edge_mlp2 = nn.Sequential(
-                nn.Linear(node_dim + node_dim + edge_attr_dim + 8, message_dim),
+                nn.Linear(node_dim + node_dim + edge_attr_dim + angle_dim, message_dim),
                 act,
                 nn.Linear(message_dim, message_dim),
                 act
@@ -222,7 +225,10 @@ class EGC(nn.Module):
     ):
         angle, (idx_i, idx_j, idx_k) = calculate_angles(coord, edge_index, node_feat.size(0), True)
 
-        transformed_angle = get_fourrier_features(angle)
+        if self.ffa:
+            transformed_angle = get_fourrier_features(angle)
+        else:
+            transformed_angle = angle.unsqueeze(1)
         edge_feat2 = torch.cat([node_feat[idx_j], node_feat[idx_k], transformed_angle], dim=1)
         out = self.edge_mlp2(edge_feat2)
         out_agg = aggregated_sum_2_indices(out, idx_i, idx_j, coord_radial.size(0), mean=self.aggr_coord == 'mean')

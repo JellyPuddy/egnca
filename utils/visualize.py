@@ -197,7 +197,8 @@ def coord2scatter(
     transparent: Optional[bool] = False,
     font_size: Optional[int] = 15,
     ax: Optional[plt.Axes] = None,
-    show_anchors: Optional[bool] = False
+    show_anchors: Optional[bool] = False,
+    n_anchors: Optional[int]= None,
 ):
     assert coord.ndim == 2 or coord.ndim == 3
     plt.rcParams.update({'font.size': font_size})
@@ -205,7 +206,8 @@ def coord2scatter(
     if isinstance(coord, torch.Tensor):
         coord = coord.detach().cpu().numpy()
     coord = coord - coord.mean(0, keepdims=True) if zero_center else coord
-    color = ['blue' for _ in range(coord.shape[0] - coord.shape[1] - 1)] + ['red' for _ in range(coord.shape[1] + 1)] if show_anchors else 'C0'
+    n_anchors = coord.shape[1] + 1 if n_anchors is None else n_anchors
+    color = ['blue' for _ in range(coord.shape[0] - n_anchors)] + ['red' for _ in range(n_anchors)] if show_anchors else 'C0'
     if coord.shape[1] == 2:
         if ax is None:
             fig, ax = plt.subplots()

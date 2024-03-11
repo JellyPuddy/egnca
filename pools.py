@@ -130,6 +130,7 @@ class GaussianSeedPool:
         device: Optional[str] = 'cuda',
         structured_seed: Optional[bool] = False,
         anchor_feat: Optional[torch.Tensor] = None,
+        anchor_coords: Optional[torch.Tensor] = None
     ):
         assert std > 0.0
         assert std_damage >= 0
@@ -155,12 +156,9 @@ class GaussianSeedPool:
         if structured_seed:
             assert anchor_feat is not None
             self.anchor_feat = anchor_feat
-            assert node_dim >= coord_dim + 1
             if fixed_init_coord:
-                # Initialze coords of anchor nodes
-                anchor_coords = get_anchor_coords(coord_dim)
-                # Replace the last coord_dim+1 coords with the anchor coords.
-                self.init_coord[-(coord_dim+1):] = anchor_coords
+                # Replace the last coords with the anchor coords.
+                self.init_coord[-(anchor_coords.size(0)):] = anchor_coords
         self.pool_node_feat = self.init_node_feat.clone().unsqueeze(0).repeat(pool_size, 1, 1)
 
         self.pool_loss = torch.full((pool_size, ), torch.inf)
@@ -191,7 +189,7 @@ class GaussianSeedPool:
         else:
             coord[id_reset] = self.init_coord.clone().to(self.device)
         if self.structured_seed:
-            node_feat[:, -(self.coord_dim+1):] = self.anchor_feat
+            node_feat[:, -(self.anchor_feat.size(0)):] = self.anchor_feat
 
         if self.sparse:
             coord = coord.view(-1, self.coord_dim)

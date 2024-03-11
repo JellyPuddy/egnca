@@ -35,6 +35,10 @@ parser.add_argument('-ed',  '--edge_distance',  type=float, default=None,   help
 parser.add_argument('-en',  '--edge_num',       type=int,   default=None,   help='maximal number of edges for dynamic edges')
 parser.add_argument('-ss',  dest='structured_seed', action='store_true', default=False, help='use structured seed')
 parser.add_argument('-uaf', dest='update_anchor_feat', action='store_true', default=False, help='allow anchor features to be updated')
+parser.add_argument('-as',  '--anchor_structure', type=str, default='simplex', help='structure of the anchor features: simplex | corners')
+parser.add_argument('-ad',  '--anchor_dist',    type=float, default=0.25,   help='distance from which nodes can be connected to anchors')
+parser.add_argument('-l',   '--loss',           type=str,   default='mse',  help='loss function: mse | local')
+parser.add_argument('-ffa', dest='fourrier_feat_angles', action='store_true', default=False, help='use fourrier features for angles')
 
 parser.add_argument('-nd',  '--node_dim',       type=int,   default=16,     help='node feature dimension')
 parser.add_argument('-md',  '--message_dim',    type=int,   default=32,     help='hidden feature dimension')
@@ -75,7 +79,7 @@ print(args)
 if args.seed is not None:
     init_random_seeds(args.seed)
 
-target_coord, edge_index = get_geometric_graph(args.dataset, structured_seed=args.structured_seed)
+target_coord, edge_index, _ = get_geometric_graph(args.dataset, anchor_structure=args.anchor_structure, anchor_dist=args.anchor_dist)
 dataset = GeometricGraphDataset(
     coord=target_coord,
     edge_index=edge_index,
@@ -112,8 +116,6 @@ with open(trainer.logger.log_dir + '/commandline.txt', 'w') as f:
     f.write(' '.join(sys.argv))
 with open(trainer.logger.log_dir + '/args.txt', 'w') as f:
     json.dump(args.__dict__, f, indent=2, default=lambda o: '<not serializable>')
-
-# TODO add random seed
 
 model = FixedTargetGAE(args)
 tik = time.time()
