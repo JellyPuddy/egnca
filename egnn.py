@@ -2,7 +2,7 @@ from typing import Optional, List, Tuple
 from torch import nn
 import torch
 
-from utils.utils import calculate_angles, get_fourrier_features, triplets
+from utils.utils import calculate_angles
 
 def aggregated_sum(
     data: torch.Tensor,
@@ -17,6 +17,23 @@ def aggregated_sum(
         agg = agg / counts.clamp(min=1)
     return agg
 
+# def aggregated_sum_2_indices(
+#     data: torch.Tensor,
+#     index_i: torch.LongTensor,
+#     index_j: torch.LongTensor,
+#     num_segments: int,
+#     mean: bool = False
+# ):
+#     index_i = index_i.unsqueeze(1).repeat(1, data.size(1))
+#     index_j = index_j.unsqueeze(1).repeat(1, data.size(1))
+#     agg = data.new_full((num_segments, data.size(1)), 0).scatter_add_(0, index_i, data)
+#     agg = agg.scatter_add_(0, index_j, data)
+#     if mean:
+#         counts = data.new_full((num_segments, data.size(1)), 0).scatter_add_(0, index_i, torch.ones_like(data))
+#         counts = counts.scatter_add_(0, index_j, torch.ones_like(data))
+#         agg = agg / counts.clamp(min=1)
+#     return agg
+
 def aggregated_sum_2_indices(
     data: torch.Tensor,
     index_i: torch.LongTensor,
@@ -24,13 +41,11 @@ def aggregated_sum_2_indices(
     num_segments: int,
     mean: bool = False
 ):
-    index_i = index_i.unsqueeze(1).repeat(1, data.size(1))
-    index_j = index_j.unsqueeze(1).repeat(1, data.size(1))
-    agg = data.new_full((num_segments, data.size(1)), 0).scatter_add_(0, index_i, data)
-    agg = agg.scatter_add_(0, index_j, data)
+    index = torch.cat([index_i.unsqueeze(1), index_j.unsqueeze(1)], dim=1).unique(dim=0, return_inverse=True)[1]
+    index = index.unsqueeze(1).repeat(1, data.size(1))
+    agg = data.new_full((num_segments, data.size(1)), 0).scatter_add_(0, index, data)
     if mean:
-        counts = data.new_full((num_segments, data.size(1)), 0).scatter_add_(0, index_i, torch.ones_like(data))
-        counts = counts.scatter_add_(0, index_j, torch.ones_like(data))
+        counts = data.new_full((num_segments, data.size(1)), 0).scatter_add_(0, index, torch.ones_like(data))
         agg = agg / counts.clamp(min=1)
     return agg
 
@@ -43,6 +58,38 @@ def n_nodes2mask(
         [torch.cat([n_nodes.new_ones(1, n), n_nodes.new_zeros(1, max_n_nodes - n)], dim=1) for n in n_nodes], dim=0
     ).bool()
     return mask
+
+
+class FourierLayer(nn.Module):
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        sigma: Optional[float] = 1.0,
+        flatten01: Optional[bool] = False,
+        learnable: Optional[bool] = False
+    ):
+        super(FourierLayer, self).__init__()
+        assert out_features % 2 == 0, 'Number of output features must be even.'
+        self.in_features = in_features
+        self.out_features = out_features
+        self.sigma = sigma
+        self.flatten01 = flatten01
+
+        coeff = torch.normal(0.0, sigma, (in_features, out_features // 2))
+        if learnable:
+            self.coeff = nn.Parameter(coeff)
+        else:
+            self.register_buffer('coeff', coeff)
+
+    def forward(self, x: torch.Tensor):
+        x_proj = 2 * torch.pi * x @ self.coeff
+        x_ff = torch.cat([x_proj.cos(), x_proj.sin()], dim=-1)
+        return x_ff
+
+    def extra_repr(self) -> str:
+        return '{}, {}, sigma={}'.format(self.in_features, self.out_features, self.sigma)
 
 
 class EGC(nn.Module):
@@ -64,7 +111,10 @@ class EGC(nn.Module):
         aggr_hidden:  Optional[str] = 'sum',
         has_coord_act: Optional[bool] = False,
         use_angles: Optional[bool] = False,
-        ffa: Optional[bool] = False
+        ffa: Optional[bool] = False,
+        ffr: Optional[bool] = False,
+        angle_type: Optional[str] = 'undirected',
+        beacon_coords: Optional[torch.Tensor] = None,
     ):
         super(EGC, self).__init__()
         assert aggr_coord == 'mean' or aggr_coord == 'sum'
@@ -86,14 +136,36 @@ class EGC(nn.Module):
         self.has_coord_act = has_coord_act
         self.use_angles = use_angles
         self.ffa = ffa
+        self.ffr = ffr
+        self.angle_type = angle_type
+
+        if beacon_coords is not None:
+            self.register_buffer('beacon_coords', beacon_coords)
+        else:
+            self.beacon_coords = None
 
         expressiveness_dim = message_dim if use_angles else 0
         angle_dim = 8 if ffa else 1
+        radial_dim = 8 if ffr else 1
+        if beacon_coords is not None:
+            radial_dim *= beacon_coords.size(0) + 1
+        # beacon_dim = beacon_coords.size(0) if beacon_coords is not None else 0
+        beacon_dim = 0
+        if beacon_coords is not None and use_angles:
+            beacon_angle_dim = beacon_coords.size(0)
+            if ffa:
+                beacon_angle_dim *= 8
+        else:
+            beacon_angle_dim = 0
+        # beacon_angle_dim = 0
+
+        # if ffa or ffr:
+        self.ff1 = FourierLayer(1, 8)
 
         act = {'tanh': nn.Tanh(), 'lrelu': nn.LeakyReLU(), 'silu': nn.SiLU()}[act_name]
 
         self.edge_mlp = nn.Sequential(
-            nn.Linear(node_dim + node_dim + edge_attr_dim + expressiveness_dim + 1, message_dim),
+            nn.Linear(node_dim + node_dim + edge_attr_dim + expressiveness_dim + radial_dim + beacon_angle_dim, message_dim),
             act,
             nn.Linear(message_dim, message_dim),
             act
@@ -108,7 +180,7 @@ class EGC(nn.Module):
             )
 
         self.node_mlp = nn.Sequential(
-            nn.Linear(message_dim + node_dim, message_dim),
+            nn.Linear(message_dim + node_dim + beacon_dim, message_dim),
             act,
             nn.Linear(message_dim, self.out_node_dim)
         )
@@ -173,10 +245,11 @@ class EGC(nn.Module):
         node_feat: torch.Tensor,
         edge_feat: torch.Tensor,
         edge_index: torch.LongTensor,
-        n_nodes: Optional[torch.LongTensor] = None
+        n_nodes: Optional[torch.LongTensor] = None,
+        beacon_radial: Optional[torch.Tensor] = None
     ):
         if node_feat.ndim == 2:
-            out = self.node_model_sparse(node_feat, edge_feat, edge_index)
+            out = self.node_model_sparse(node_feat, edge_feat, edge_index, beacon_radial)
         else:
             out = self.node_model_dense(node_feat, edge_feat, edge_index, n_nodes)
         return out
@@ -200,11 +273,16 @@ class EGC(nn.Module):
         edge_weight: Optional[torch.Tensor] = None,
         edge_attr: Optional[torch.Tensor] = None
     ):
+        if self.ffr:
+            transformed_coord_radial = self.ff1(coord_radial.reshape(-1, 1)).reshape(coord_radial.size(0), -1)
+        else:
+            transformed_coord_radial = coord_radial
+
         if edge_attr is not None:
             assert edge_attr.size(1) == self.edge_attr_dim
-            edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], coord_radial, edge_attr], dim=1)
+            edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], transformed_coord_radial, edge_attr], dim=1)
         else:
-            edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], coord_radial], dim=1)
+            edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], transformed_coord_radial], dim=1)
 
         out = self.edge_mlp(edge_feat)
         if edge_weight is not None:
@@ -223,31 +301,69 @@ class EGC(nn.Module):
         edge_weight: Optional[torch.Tensor] = None,
         edge_attr: Optional[torch.Tensor] = None
     ):
-        angle, (idx_i, idx_j, idx_k) = calculate_angles(coord, edge_index, node_feat.size(0), True)
+        angle, (idx_i, idx_j, idx_k) = calculate_angles(coord, edge_index, node_feat.size(0), self.angle_type, True)
+        # assert not torch.isnan(angle).any() and not torch.isnan(idx_i).any() and not torch.isnan(idx_j).any() and not torch.isnan(idx_k).any()
 
         if self.ffa:
-            transformed_angle = get_fourrier_features(angle)
+            transformed_angle = self.ff1(angle.unsqueeze(1))
         else:
             transformed_angle = angle.unsqueeze(1)
         edge_feat2 = torch.cat([node_feat[idx_j], node_feat[idx_k], transformed_angle], dim=1)
+        # assert not torch.isnan(edge_feat2).any()
         out = self.edge_mlp2(edge_feat2)
+        if torch.isnan(out).any():
+            for name, param in self.named_parameters():
+                print(name, param.grad)
+                if param.grad is not None:
+                    if not torch.isfinite(param.grad).all(): print(f'Gradient of {name} is not finite')
+            # assert False, 'Output of edge_mlp2 is not finite'
         out_agg = aggregated_sum_2_indices(out, idx_i, idx_j, coord_radial.size(0), mean=self.aggr_coord == 'mean')
+        # assert not torch.isnan(out_agg).any()
 
-        # transformed_coord_radial = get_fourrier_features(coord_radial)
+        if self.ffr:
+            transformed_coord_radial = self.ff1(coord_radial.reshape(-1, 1)).reshape(coord_radial.size(0), -1)
+        else:
+            transformed_coord_radial = coord_radial
+        
+        # Beacon angles
+        if self.beacon_coords is not None:
+            # coord_diff = coord[edge_index[0]] - coord[edge_index[1]]
+            coord_diff = coord.index_select(0, edge_index[0]) - coord.index_select(0, edge_index[1])
+            coord_diff = coord_diff.unsqueeze(1).repeat(1, self.beacon_coords.size(0), 1)
+
+            repeated_beacon_coords = self.beacon_coords.unsqueeze(0).repeat(edge_index.size(1), 1, 1)
+            # repeated_coords = coord[edge_index[0]].unsqueeze(1).repeat(1, self.beacon_coords.size(0), 1)
+            repeated_coords = coord.index_select(0, edge_index[0]).unsqueeze(1).repeat(1, self.beacon_coords.size(0), 1)
+            beacon_diff = repeated_coords - repeated_beacon_coords
+
+            # Calculate angles. Shape is (num_edges, num_beacons)
+            angles = calculate_angles(None, None, None, coord_ik=beacon_diff, coord_ij=coord_diff)
+            # assert not torch.isnan(angles).any()
+
+            if self.ffa:
+                transformed_beacon_angles = self.ff1(angles.reshape(-1, 1)).reshape(angles.size(0), -1)
+            else:
+                transformed_beacon_angles = angles
+        else:
+            transformed_beacon_angles = torch.tensor([], device=coord.device, dtype=coord.dtype)
 
         if edge_attr is not None:
             assert edge_attr.size(1) == self.edge_attr_dim
-            edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, coord_radial, edge_attr], dim=1)
-            # edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, transformed_coord_radial, edge_attr], dim=1)
+            # edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, coord_radial, edge_attr], dim=1)
+            edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, transformed_coord_radial, transformed_beacon_angles, edge_attr], dim=1)
         else:
-            edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, coord_radial], dim=1)
-            # edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, transformed_coord_radial], dim=1)
+            # edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, coord_radial], dim=1)
+            edge_feat = torch.cat([node_feat[edge_index[0]], node_feat[edge_index[1]], out_agg, transformed_coord_radial, transformed_beacon_angles], dim=1)
+
+        # assert not torch.isnan(edge_feat).any()
 
         out = self.edge_mlp(edge_feat)
         if edge_weight is not None:
             out = edge_weight.unsqueeze(1) * out
         if self.has_attention:
             out = self.attention_mlp(out) * out
+        
+        # assert not torch.isnan(out).any()
 
         return out
 
@@ -279,9 +395,14 @@ class EGC(nn.Module):
         node_feat: torch.Tensor,
         edge_feat: torch.Tensor,
         edge_index: torch.LongTensor,
+        beacon_radial: Optional[torch.Tensor] = None
     ):
         edge_feat_agg = aggregated_sum(edge_feat, edge_index[0], node_feat.size(0), mean=self.aggr_hidden == 'mean')
-        out = self.node_mlp(torch.cat([node_feat, edge_feat_agg], dim=1))
+        if beacon_radial is not None:
+            1/0
+            out = self.node_mlp(torch.cat([node_feat, edge_feat_agg, beacon_radial], dim=1))
+        else:
+            out = self.node_mlp(torch.cat([node_feat, edge_feat_agg], dim=1))
         if self.is_residual:
             out = node_feat + out
         return out
@@ -295,6 +416,14 @@ class EGC(nn.Module):
         coord_radial = torch.sum(coord_diff ** 2, 1, keepdim=True)
         if self.normalize:
             coord_diff = coord_diff / (torch.sqrt(coord_radial).detach() + 1)
+        # if self.beacon_coords is not None:
+        #     repeated_beacon_coords = self.beacon_coords.unsqueeze(0).repeat(edge_index.size(1), 1, 1)
+        #     repeated_coord = coord[edge_index[0]].unsqueeze(1).repeat(1, self.beacon_coords.size(0), 1)
+        #     beacon_diff = repeated_coord - repeated_beacon_coords
+        #     beacon_radial = torch.sum(beacon_diff ** 2, 2)
+        #     # coord_radial = torch.cat([coord_radial, beacon_radial], dim=1)
+        #     return coord_diff, coord_radial, beacon_radial
+        # else:
         return coord_diff, coord_radial
 
     def edge_model_dense(
@@ -389,15 +518,29 @@ class EGC(nn.Module):
         assert not self.has_vel or vel is not None
 
         coord_diff, coord_radial = self.coord2radial(coord, edge_index)
+        # assert not torch.isnan(coord_diff).any() and not torch.isnan(coord_radial).any()
+        if self.beacon_coords is not None:
+            repeated_beacon_coords = self.beacon_coords.unsqueeze(0).repeat(edge_index.size(1), 1, 1)
+            # repeated_beacon_coords = self.beacon_coords.unsqueeze(0).repeat(coord.size(0), 1, 1)
+            repeated_coord = coord[edge_index[0]].unsqueeze(1).repeat(1, self.beacon_coords.size(0), 1)
+            # repeated_coord = coord.unsqueeze(1).repeat(1, self.beacon_coords.size(0), 1)
+            beacon_diff = repeated_coord - repeated_beacon_coords
+            beacon_radial = torch.sum(beacon_diff ** 2, 2)
+            coord_radial = torch.cat([coord_radial, beacon_radial], dim=1)
+            beacon_radial = None
+        else:
+            beacon_radial = None
+
         edge_feat = self.edge_model(coord, node_feat, edge_index, coord_radial, edge_weight, edge_attr)
+        # assert not torch.isnan(edge_feat).any()
 
         if self.has_vel:
             coord, vel = self.coord_model(coord, coord_diff, edge_feat, edge_index, node_feat, vel)
-            node_feat = self.node_model(node_feat, edge_feat, edge_index, n_nodes)
+            node_feat = self.node_model(node_feat, edge_feat, edge_index, n_nodes, beacon_radial)
             return coord, node_feat, vel
         else:
             coord = self.coord_model(coord, coord_diff, edge_feat, edge_index)
-            node_feat = self.node_model(node_feat, edge_feat, edge_index, n_nodes)
+            node_feat = self.node_model(node_feat, edge_feat, edge_index, n_nodes, beacon_radial)
             return coord, node_feat
 
     def __repr__(self):
@@ -438,42 +581,61 @@ class EGNN(nn.Module):
 
 
 def test_egnn_equivariance():
+    from time import time
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device {device}")
     num_nodes, node_dim, message_dim, coord_dim = 6, 8, 16, 3
+    beacon_coords = torch.randn(3, coord_dim, dtype=torch.float64).to(device)
+    # beacon_coords = None
     egnn = EGNN([
-        EGC(coord_dim, node_dim, message_dim, has_attention=True, has_vel=True, has_vel_norm=True),
-        EGC(coord_dim, node_dim, message_dim, has_attention=True, has_vel=True, has_vel_norm=True)
-    ]).to(device)
+        EGC(coord_dim, node_dim, message_dim, has_attention=True, has_vel=True, has_vel_norm=True, beacon_coords=beacon_coords, use_angles=True, ffa=True, ffr=True),
+        EGC(coord_dim, node_dim, message_dim, has_attention=True, has_vel=True, has_vel_norm=True, beacon_coords=beacon_coords, use_angles=True, ffa=True, ffr=True)
+    ]).to(device).to(dtype=torch.float64)
     node_feat = torch.randn(num_nodes, node_dim).to(device)
-    vel_1 = torch.randn(num_nodes, coord_dim).to(device)
+    vel_1 = torch.randn(num_nodes, coord_dim, dtype=torch.float64).to(device)
 
     W = torch.randn(num_nodes, num_nodes).sigmoid().to(device)
     W = (torch.tril(W) + torch.tril(W, -1).T)
     edge_index = (W.fill_diagonal_(0) > 0.5).nonzero().T
 
-    for i in range(50):
+    for i in range(5):
         print(i)
+        start_time = time()
 
-        rotation = torch.nn.init.orthogonal_(torch.empty(coord_dim, coord_dim)).to(device)
+        rotation = torch.nn.init.orthogonal_(torch.empty(coord_dim, coord_dim, dtype=torch.float64)).to(device)
         vel_2 = torch.matmul(rotation, vel_1.T).T
-        translation = torch.randn(1, coord_dim).to(device)
+        translation = torch.randn(1, coord_dim, dtype=torch.float64).to(device)
 
-        in_coord_1 = torch.randn(num_nodes, coord_dim).to(device)
+        in_coord_1 = torch.randn(num_nodes, coord_dim, dtype=torch.float64).to(device)
         in_coord_2 = torch.matmul(rotation, in_coord_1.T).T + translation
 
+        if beacon_coords is not None:
+            for layer in egnn.layers:
+                layer.beacon_coords = beacon_coords
         out_coord_1 = egnn(in_coord_1, node_feat, edge_index, vel=vel_1)[0]
+        for _ in range(25):
+            out_coord_1 = egnn(out_coord_1, node_feat, edge_index, vel=vel_1)[0]
+
+        if beacon_coords is not None:
+            rotated_beacon_coords = torch.matmul(rotation, beacon_coords.T).T + translation
+            for layer in egnn.layers:
+                layer.beacon_coords = rotated_beacon_coords
+
         out_coord_2 = egnn(in_coord_2, node_feat, edge_index, vel=vel_2)[0]
+        for _ in range(25):
+            out_coord_2 = egnn(out_coord_2, node_feat, edge_index, vel=vel_2)[0]
 
         out_coord_1_aug = torch.matmul(rotation, out_coord_1.T).T + translation
         assert torch.allclose(out_coord_2, out_coord_1_aug, atol=1e-6)
+        print(f'Time: {time() - start_time:.4f}')
 
     print('Test succeeded.')
 
 
 def test_equivalence_sparse_dense():
 
-    from utils import pad3d, edge_index2adj_with_weight
+    from utils.utils import pad3d, edge_index2adj_with_weight
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 

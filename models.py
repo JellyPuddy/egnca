@@ -1,3 +1,4 @@
+from data.datasets import text_to_graph
 from pools import GaussianMultiSeedPool, GaussianSeedPool
 from decoders import EuclideanDecoder
 from egnn import EGC, EGNN
@@ -57,14 +58,20 @@ class EncoderEGNCA(nn.Module):
         use_angles: Optional[bool] = False,
         relative_edges: Optional[bool] = False,
         dynamic_edges: Optional[bool] = False,
+        dynamic_edge_steps: Optional[int] = 1,
         edge_distance: Optional[float] = 0.15,
         edge_num: Optional[int] = None,
+        min_edges: Optional[int] = 0,
         structured_seed: Optional[bool] = False,
+        beacon: Optional[bool] = False,
         scale: Optional[float] = 1.0,
         update_anchor_feat: Optional[bool] = False,
         anchor_feat: Optional[torch.Tensor] = None,
         anchor_coords: Optional[torch.Tensor] = None,
-        ffa: Optional[bool] = False
+        anchor_dist: Optional[float] = None,
+        ffa: Optional[bool] = False,
+        ffr: Optional[bool] = False,
+        angle_type: Optional[str] = 'undirected'
     ):
         super(EncoderEGNCA, self).__init__()
         assert norm_type is None or norm_type == 'nn' or norm_type == 'pn'
@@ -76,15 +83,25 @@ class EncoderEGNCA(nn.Module):
         self.init_rand_node_feat = init_rand_node_feat
         self.relative_edges = relative_edges
         self.dynamic_edges = dynamic_edges
+        self.dynamic_edge_steps = dynamic_edge_steps
         self.edge_distance = edge_distance
         self.edge_num = edge_num
+        self.min_edges = min_edges
         self.structured_seed = structured_seed
+        self.beacon = beacon
         self.scale = scale
         self.update_anchor_feat = update_anchor_feat
         self.anchor_feat = anchor_feat
-        self.anchor_coords = anchor_coords
         self.ffa = ffa
+        self.ffr = ffr
+        self.angle_type = angle_type
+        self.n_anchors = len(anchor_coords) if anchor_coords is not None else 0
+        self.anchor_dist = anchor_dist
 
+        # if anchor_coords is not None:
+        #     self.register_buffer('anchor_coords', anchor_coords)
+
+        # TODO try these out
         if norm_type == 'nn':
             self.normalise = NodeNorm(root_power=2.0 if norm_cap is None else norm_cap)
         elif norm_type == 'pn':
@@ -102,8 +119,12 @@ class EncoderEGNCA(nn.Module):
                 is_residual=is_residual,
                 has_attention=has_attention,
                 has_coord_act=has_coord_act,
+                normalize=True,
                 use_angles=use_angles,
-                ffa=ffa))
+                ffa=ffa,
+                ffr=ffr,
+                angle_type=angle_type,
+                beacon_coords=anchor_coords if beacon else None))
         self.egnn = EGNN(layers)
 
     @property
@@ -152,9 +173,18 @@ class EncoderEGNCA(nn.Module):
         n_nodes: Optional[torch.LongTensor] = None
     ):
         assert 0 < self.fire_rate <= 1
-        assert not torch.isnan(in_node_feat).any()
-        assert not torch.isnan(in_coord).any()
+        # assert not torch.isnan(in_node_feat).any()
+        # assert not torch.isnan(in_coord).any()
+        # if self.anchor_coords is not None and self.beacon:
+        #     anchor_coords = self.anchor_coords.to(in_coord.device)
+        #     anchor_feat = self.anchor_feat.to(in_node_feat.device)
+        # coord = torch.cat([in_coord, anchor_coords], dim=0) if self.beacon else in_coord
+        # node_feat = torch.cat([in_node_feat, anchor_feat], dim=0) if self.beacon else in_node_feat
+        # out_coord, out_node_feat = self.egnn(edge_index=edge_index, coord=coord, node_feat=node_feat)
+        # out_coord = out_coord[:-self.anchor_feat.size(0)] if self.beacon else out_coord
+        # out_node_feat = out_node_feat[:-self.anchor_feat.size(0)] if self.beacon else out_node_feat
         out_coord, out_node_feat = self.egnn(edge_index=edge_index, coord=in_coord, node_feat=in_node_feat)
+        # assert not torch.isnan(out_node_feat).any()
         if isinstance(self.normalise, NodeNorm):
             out_node_feat = self.normalise(out_node_feat)
         elif isinstance(self.normalise, PairNorm):
@@ -169,14 +199,16 @@ class EncoderEGNCA(nn.Module):
                 mask[-self.anchor_feat.size(0):] = 0
             out_coord = (out_coord * mask) + (in_coord * (1 - mask))
         elif self.structured_seed:
-            out_coord[-self.anchor_feat.size(0):] = in_coord[-self.anchor_feat.size(0):]
-            anchor_mask = torch.zeros(self.anchor_feat.size(0), self.node_dim).byte().to(in_coord.device)
-            # Possibly update the anchor features
-            if self.update_anchor_feat:
-                anchor_mask += 1
-            out_node_feat[-self.anchor_feat.size(0):] = (out_node_feat[-self.anchor_feat.size(0):] * anchor_mask) + (in_node_feat[-self.anchor_feat.size(0):] * (1 - anchor_mask))
-        assert not torch.isnan(out_node_feat).any()
-        assert not torch.isnan(out_coord).any()
+            anchor_mask = torch.zeros(in_coord.size(0)).byte().to(in_coord.device)
+            offset_nodes = torch.Tensor.tolist(n_nodes.cumsum(0))
+            for i in range(len(n_nodes)):
+                anchor_mask[offset_nodes[i] - self.anchor_feat.size(0): offset_nodes[i]] = 1
+            
+            out_coord[anchor_mask] = in_coord[anchor_mask]
+            if not self.update_anchor_feat:
+                out_node_feat[anchor_mask] = in_node_feat[anchor_mask]
+        # assert not torch.isnan(out_node_feat).any()
+        # assert not torch.isnan(out_coord).any()
         return out_coord, out_node_feat
 
     def forward(
@@ -188,41 +220,65 @@ class EncoderEGNCA(nn.Module):
         n_nodes: Optional[torch.LongTensor] = None,
         return_inter_states: Optional[bool] = False,
         progress_bar: Optional[bool] = False,
-        dtype: Optional[torch.dtype] = torch.float32
+        dtype: Optional[torch.dtype] = torch.float32,
+        dynamic_edge_steps: Optional[int] = None
     ):
         if coord is None:
             num_nodes = edge_index[0].max() + 1 if n_nodes is None else n_nodes.sum().item()
             coord = self.init_coord(num_nodes, dtype=dtype, device=edge_index.device)
+        else:
+            dtype = coord.dtype
         if node_feat is None:
             node_feat = self.init_node_feat(coord.size(0), dtype=dtype, device=coord.device)
 
         if n_nodes is None:
             n_nodes = torch.tensor([coord.size(0)]).to(coord.device)
+        
+        new_edge_index = compute_edge_index(edge_index, coord, n_nodes, self.relative_edges, self.dynamic_edges, in_step=False, distance=self.edge_distance, n_neighbours=self.edge_num, min_neighbours=self.min_edges, n_anchors=self.n_anchors, anchor_distance=self.anchor_dist)
 
         loop = tqdm(range(n_steps)) if progress_bar else range(n_steps)
-        inter_states = [(coord, node_feat)] if return_inter_states else None
+        inter_states = [(coord, node_feat, new_edge_index)] if return_inter_states else None
         for _ in loop:
-            new_edge_index = compute_edge_index(edge_index, coord, n_nodes, self.relative_edges, self.dynamic_edges, in_step=True, distance=self.edge_distance, n_neighbours=self.edge_num)
+            dynamic_edges = self.dynamic_edges and _ % (dynamic_edge_steps or self.dynamic_edge_steps) == 0 and _ > 0
+            new_edge_index = compute_edge_index(new_edge_index, coord, n_nodes, self.relative_edges, dynamic_edges, in_step=True, distance=self.edge_distance, n_neighbours=self.edge_num, min_neighbours=self.min_edges, n_anchors=self.n_anchors, anchor_distance=self.anchor_dist)
             coord, node_feat = self.stochastic_update(new_edge_index, coord, node_feat, n_nodes)
-            if return_inter_states: inter_states.append((coord, node_feat))
+            if return_inter_states: inter_states.append((coord, node_feat, new_edge_index))
 
-        return list(map(list, zip(*inter_states))) if return_inter_states else (coord, node_feat)
+        return list(map(list, zip(*inter_states))) if return_inter_states else (coord, node_feat, new_edge_index)
 
 
 class FixedTargetGAE(pl.LightningModule):
 
     def __init__(
         self,
-        args: Namespace
+        args: Namespace,
+        verbose=False
     ):
         super().__init__()
 
         self.structured_seed = args.structured_seed if 'structured_seed' in args else False
+        self.beacon = args.beacon if 'beacon' in args else False
+        if self.beacon:
+            self.structured_seed = False
         self.anchor_structure = args.anchor_structure if 'anchor_structure' in args else None
+        self.anchor_dist = args.anchor_dist if 'anchor_dist' in args else None
+        if verbose: print(f'{"Beacon" if self.beacon else "Anchor"} structure: {self.anchor_structure}, Anchor distance: {self.anchor_dist}')
+        anchor_scale = args.anchor_scale if 'anchor_scale' in args else 1.0
+        self.data_text = args.data_text if 'data_text' in args else None
+        self.data_text_size = args.data_text_size if 'data_text_size' in args else None
+        self.data_text_distance = args.data_text_distance if 'data_text_distance' in args else None
 
         # load target geometric graph as model attribute
-        from data.datasets import get_geometric_graph
-        target_coord, edge_index, anchor_coords = get_geometric_graph(args.dataset, anchor_structure=self.anchor_structure)
+        if self.data_text is not None:
+            target_coord, edge_index, anchor_coords = text_to_graph(self.data_text, self.data_text_size, self.data_text_distance, self.anchor_structure, self.anchor_dist, anchor_scale)
+        else:
+            from data.datasets import get_geometric_graph
+            if self.structured_seed:
+                target_coord, edge_index, anchor_coords = get_geometric_graph(args.dataset, anchor_structure=self.anchor_structure, anchor_dist=self.anchor_dist, anchor_scale=anchor_scale)
+            else:
+                if verbose: print("No structured seed")
+                target_coord, edge_index, anchor_coords = get_geometric_graph(args.dataset)
+                if verbose: print(target_coord.shape)
         self.register_buffer('target_coord', target_coord * args.scale)
         self.register_buffer('edge_index', edge_index)
 
@@ -231,15 +287,54 @@ class FixedTargetGAE(pl.LightningModule):
         use_angles = args.angles if 'angles' in args else False
         self.relative_edges = args.relative_edges if 'relative_edges' in args else False
         self.dynamic_edges = args.dynamic_edges if 'dynamic_edges' in args else False
+        self.dynamic_edge_steps = args.dynamic_edge_steps if 'dynamic_edge_steps' in args else 1
+        self.dynamic_edge_sch = args.dynamic_edge_sch if 'dynamic_edge_sch' in args else [0, self.dynamic_edge_steps]
         self.edge_distance = args.edge_distance if 'edge_distance' in args else 0.15
+        self.loss_edge_distance = args.loss_edge_distance if 'loss_edge_distance' in args else self.edge_distance
+        self.loss_edge_distance = self.edge_distance if self.loss_edge_distance is None else self.loss_edge_distance
+        self.loss_edge_distance = None if self.loss_edge_distance == -1 else self.loss_edge_distance
         self.edge_num = args.edge_num if 'edge_num' in args else None
+        self.loss_edge_num = args.loss_edge_num if 'loss_edge_num' in args else self.edge_num
+        self.loss_edge_num = self.edge_num if self.loss_edge_num is None else self.loss_edge_num
+        self.loss_edge_num = None if self.loss_edge_num == -1 else self.loss_edge_num
+        self.min_edges = args.min_edges if 'min_edges' in args else 0
+        self.loss_min_edges = args.loss_min_edges if 'loss_min_edges' in args else self.min_edges
+        self.loss_min_edges = self.min_edges if self.loss_min_edges is None else self.loss_min_edges
+        self.loss_min_edges = None if self.loss_min_edges == -1 else self.loss_min_edges
         self.update_anchor_feat = args.update_anchor_feat if 'update_anchor_feat' in args else False
         self.loss_fn = args.loss if 'loss' in args else 'mse'
-        self.ffa = args.fourrier_feat_angles if 'fourrier_feat_angles' in args else False
+        self.auto_penalty_distance = args.auto_penalty_distance if 'auto_penalty_distance' in args else False
+        if self.auto_penalty_distance:
+            dist = torch.norm(target_coord[edge_index[0]] - target_coord[edge_index[1]], dim=-1)
+            self.penalty_distance = dist.max().item()
+            self.penalty_distance_min = dist.min().item()
+        else:
+            self.penalty_distance = args.penalty_distance if 'penalty_distance' in args else 0.25
+            self.penalty_distance_min = args.penalty_distance_min if 'penalty_distance_min' in args else 0.1
+        self.ffa = args.fourier_feat_angles if 'fourier_feat_angles' in args else False
+        self.ffr = args.fourier_feat_radial if 'fourier_feat_radial' in args else False
+        self.random_init_coord_delay = args.random_init_coord_delay if 'random_init_coord_delay' in args else 0
+        self.random_init_coord = args.random_init_coord if 'random_init_coord' in args else False
+        # Uncomment for older models with broken random_init_coord attribute
+        # self.random_init_coord = not self.random_init_coord
+        self.fixed_init_coord = not self.random_init_coord or self.random_init_coord_delay != 0
+        self.angle_type = args.angle_type if 'angle_type' in args else 'undirected'
+        self.ot_permutation = args.ot_permutation if 'ot_permutation' in args else False
+
         if self.structured_seed and anchor_coords is not None:
+            if verbose: print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
             self.register_buffer('anchor_coords', anchor_coords * args.scale)
             # Initialize features of anchor nodes. The features are learnable parameters.
             self.register_parameter('anchor_feat', torch.nn.Parameter(torch.empty(self.anchor_coords.size(0), args.node_dim, dtype=torch.float32).normal_(args.std)))
+            self.n_anchors = len(anchor_coords)
+        else:
+            self.n_anchors = 0
+        if self.beacon:
+            if verbose: print("Beacon - register anchor coords")
+            anchor_coords = get_anchor_coords(self.anchor_structure, target_coord.shape[-1], 1).to(args.device)
+            anchor_coords = anchor_coords / ((anchor_coords.max() - anchor_coords.min()) / (target_coord.max() - target_coord.min()))
+            anchor_coords = (anchor_coords + target_coord.mean())
+            self.register_buffer('anchor_coords', anchor_coords * args.scale * anchor_scale)
 
         self.encoder = EncoderEGNCA(
             coord_dim=self.target_coord.size(1),
@@ -256,14 +351,25 @@ class FixedTargetGAE(pl.LightningModule):
             use_angles=use_angles,
             relative_edges=self.relative_edges,
             dynamic_edges=self.dynamic_edges,
+            dynamic_edge_steps=self.dynamic_edge_steps,
             edge_distance=self.edge_distance,
             edge_num=self.edge_num,
+            min_edges=self.min_edges,
             structured_seed=self.structured_seed,
+            beacon=self.beacon,
             scale=args.scale,
             update_anchor_feat=self.update_anchor_feat,
             anchor_feat=self.anchor_feat if self.structured_seed else None,
-            anchor_coords=self.anchor_coords if self.structured_seed else None,
-            ffa=self.ffa)
+            anchor_coords=self.anchor_coords if self.structured_seed or self.beacon else None,
+            anchor_dist=self.anchor_dist if self.structured_seed else None,
+            ffa=self.ffa,
+            ffr=self.ffr,
+            angle_type=self.angle_type)
+
+        init_coord = torch.empty(self.target_coord.size(0), self.target_coord.size(1)).normal_(std=args.std)
+        if self.ot_permutation:
+            perm = find_best_permutation(init_coord, self.target_coord)
+            init_coord = init_coord[perm]
 
         self.pool = GaussianSeedPool(
             pool_size=args.pool_size,
@@ -274,12 +380,16 @@ class FixedTargetGAE(pl.LightningModule):
             std_damage=args.std_damage,
             radius_damage=args.std_damage,
             device=args.device,
-            fixed_init_coord=True,
+            fixed_init_coord=self.fixed_init_coord,
+            init_coord=init_coord,
             structured_seed=self.structured_seed,
             anchor_feat=self.anchor_feat if self.structured_seed else None,
             anchor_coords=self.anchor_coords if self.structured_seed else None)
 
-        self.register_buffer('init_coord', self.pool.init_coord.clone())
+        if self.fixed_init_coord:
+            self.register_buffer('init_coord', self.pool.init_coord.clone())
+        else:
+            self.init_coord = None
         self.mse = nn.MSELoss(reduction='none')
 
         self.args = args
@@ -290,18 +400,71 @@ class FixedTargetGAE(pl.LightningModule):
         batch: Data,
         batch_idx: int
     ):
+        if self.random_init_coord_delay > 0 and self.current_epoch == self.random_init_coord_delay:
+            print('Switching to random initial coordinates')
+            self.pool.init_coord = None
+
         # next line increase batch size by increasing dataset length
         self.trainer.train_dataloader.loaders.dataset.length = \
             list_scheduler_step(self.args.batch_sch, self.current_epoch)
         batch_size = len(batch.n_nodes)
+        dynamic_edge_steps = list_scheduler_step(self.dynamic_edge_sch, self.current_epoch) if self.dynamic_edge_sch else self.dynamic_edge_steps
 
         n_steps = np.random.randint(self.args.n_min_steps, self.args.n_max_steps + 1)
         init_coord, init_node_feat, id_seeds = self.pool.get_batch(batch_size=batch_size)
 
-        edge_index = compute_edge_index(batch.edge_index, init_coord, batch.n_nodes, self.relative_edges, self.dynamic_edges, distance=self.edge_distance, n_neighbours=self.edge_num)
+        # perm = find_best_permutation(init_coord, self.target_coord)
+        # init_coord = init_coord[perm]
 
-        final_coord, final_node_feat = self.encoder(
-            edge_index, init_coord, init_node_feat, n_steps=n_steps, n_nodes=batch.n_nodes)
+        # TODO: Decide whether I want to keep this functionality, put it behind a flag
+        # with torch.no_grad():
+        #     if self.structured_seed:
+        #         indices = list(range(init_coord.size(0) - self.encoder.anchor_feat.size(0)))
+        #         pairs = list(zip(indices, init_coord))
+        #         sorted_pairs = sorted(pairs, key=lambda x: (x[1][1] * 1).round(decimals=1))
+        #         sorted_pairs = sorted(sorted_pairs, key=lambda x: (x[1][0] * 1).round(decimals=1))
+        #         sorted_indices = [x[0] for x in sorted_pairs] + list(range(init_coord.size(0) - self.encoder.anchor_feat.size(0), init_coord.size(0)))
+        #         init_coord = init_coord[sorted_indices]
+        #     else:
+        #         indices = list(range(init_coord.size(0)))
+        #         pairs = list(zip(indices, init_coord))
+        #         sorted_pairs = sorted(pairs, key=lambda x: (x[1][1] * 1).round(decimals=1))
+        #         sorted_pairs = sorted(sorted_pairs, key=lambda x: (x[1][0] * 1).round(decimals=1))
+        #         sorted_indices = [x[0] for x in sorted_pairs]
+        #         init_coord = init_coord[sorted_indices]
+        # n_anchors = self.encoder.anchor_coords.size(0) if self.structured_seed else None
+        # edge_index = ot_assignment(init_coord, self.target_coord, n_anchors=n_anchors)
+        edge_index = compute_edge_index(batch.edge_index, init_coord, batch.n_nodes, self.relative_edges, self.dynamic_edges, distance=self.edge_distance, n_neighbours=self.edge_num, min_neighbours=self.min_edges, n_anchors=self.n_anchors, anchor_distance=self.anchor_dist)
+        # assert not torch.isnan(init_node_feat).any()
+
+        # if self.beacon:
+        #     anchor_edges = torch.tensor([[i, j] for i in range(init_coord.size(0)) for j in range(init_coord.size(0), self.anchor_coords.size(0) + init_coord.size(0))], device=init_coord.device)
+        #     # print(anchor_edges.shape)
+        #     if self.update_anchor_feat:
+        #         # Add the reverse edges
+        #         anchor_edges = torch.cat([anchor_edges, anchor_edges.flip(1)], dim=0)
+        #     if self.anchor_dist is not None and self.anchor_dist >= 0:
+        #         # Keep only those edges with a distance smaller than anchor_dist
+        #         all_coords = torch.cat([init_coord, self.anchor_coords])
+        #         dist = torch.norm(all_coords[anchor_edges[:, 0]] - all_coords[anchor_edges[:, 1]], dim=-1)
+        #         anchor_edges = anchor_edges[dist < self.anchor_dist]
+        #     anchor_edges = EdgeIndex(anchor_edges.T.contiguous())
+        # else:
+        #     anchor_edges = None
+
+        # edge_index = EdgeIndex(torch.cat([edge_index, anchor_edges.T], dim=1))
+        # init_coord = torch.cat([init_coord, self.anchor_coords])
+        # init_node_feat = torch.cat([init_node_feat, self.anchor_feat])
+
+        # print(edge_index.shape)
+        # print(init_coord.shape)
+        # print(init_node_feat.shape)
+
+        final_coord, final_node_feat, edge_index = self.encoder(
+            edge_index, init_coord, init_node_feat, n_steps=n_steps, n_nodes=batch.n_nodes, dynamic_edge_steps=dynamic_edge_steps)
+        
+        if self.edge_num != self.loss_edge_num:
+            edge_index = compute_edge_index(edge_index, final_coord, batch.n_nodes, self.relative_edges, self.dynamic_edges, distance=self.loss_edge_distance, n_neighbours=self.edge_num, min_neighbours=self.loss_min_edges, n_anchors=self.n_anchors, anchor_distance=self.anchor_dist)
 
         if self.loss_fn == 'mse':
             edge_weight = torch.norm(final_coord[batch.rand_edge_index[0]] - final_coord[batch.rand_edge_index[1]], dim=-1)
@@ -309,23 +472,90 @@ class FixedTargetGAE(pl.LightningModule):
             loss_per_graph = torch.stack([lpe.mean() for lpe in loss_per_edge.chunk(batch_size)])
             loss = loss_per_graph.mean()
             loss_log = f'{loss:.6f}'
-        elif self.loss_fn == 'local':
+        elif self.loss_fn == 'local' or self.loss_fn == 'local_enp':
             with torch.no_grad():
                 edge_weight = torch.norm(final_coord[batch.rand_edge_index[0]] - final_coord[batch.rand_edge_index[1]], dim=-1)
                 loss_per_edge = self.mse(edge_weight, batch.rand_edge_weight)
-                loss_per_graph = torch.stack([lpe.mean() for lpe in loss_per_edge.chunk(batch_size)])
-                old_loss = loss_per_graph.mean()
-            dist_loss, angle_loss = local_loss(final_coord, self.target_coord, edge_index)
-            loss = dist_loss + angle_loss
-            loss_log = f'{dist_loss:.6f} + {angle_loss:.6f} = {loss:.6f} ({old_loss:.6f})'
+                old_loss_per_graph = torch.stack([lpe.mean() for lpe in loss_per_edge.chunk(batch_size)])
+                old_loss = old_loss_per_graph.mean().detach()
+            dist_loss_per_graph, angle_loss_per_graph, nb_loss_per_graph = local_loss(final_coord, self.target_coord, edge_index, self.angle_type, batch_size, extra_neighbours_penalty=self.loss_fn == 'local_enp', penalty_dist=self.penalty_distance)
+            dist_loss = dist_loss_per_graph.mean()
+            angle_loss = angle_loss_per_graph.mean()
+            nb_loss = nb_loss_per_graph.mean()
+            loss_per_graph = dist_loss_per_graph + angle_loss_per_graph + nb_loss_per_graph
+            loss = dist_loss + angle_loss + nb_loss
+            loss_log = f'{dist_loss:.6f} + {angle_loss:.6f} + {nb_loss:.6f} = {loss:.6f} ({old_loss:.6f})'
+        elif self.loss_fn == 'ot' or self.loss_fn == 'ot_p':
+            # if self.beacon:
+            #     final_coord = final_coord.reshape(batch_size, -1, self.target_coord.size(1))
+            #     target_coord = self.target_coord
+            #     target_coord = target_coord.unsqueeze(0).expand(batch_size, -1, -1)
+            #     loss_per_graph_ot, penalty_per_graph = sliced_ot_loss(final_coord, target_coord, per_sample_loss=True, penalty=self.loss_fn == 'ot_p', penalty_dist=self.penalty_distance, penalty_dist_min=self.penalty_distance_min, edge_index=edge_index, n_nodes=batch.n_nodes)
+            #     final_coord = final_coord.reshape(-1, self.target_coord.size(1))
+            # else:
+            final_coord = final_coord.reshape(batch_size, -1, self.target_coord.size(1))
+            target_coord = self.target_coord
+            target_coord = target_coord.unsqueeze(0).expand(batch_size, -1, -1)
+            # split the edge index into batches. the first betch has all edges for nodes 0 to final_coord[0].size(1)
+            anchor_diff = self.encoder.anchor_feat.size(0) if self.structured_seed else 0
+            offset = torch.cat([torch.zeros(1, dtype=torch.long).to(batch.n_nodes.device), batch.n_nodes.cumsum(0)])
+            edge_index_split = [edge_index[:, (edge_index[0] >= i * final_coord.size(1)).logical_and(edge_index[0] < (i + 1) * final_coord.size(1) - anchor_diff)
+                                           .logical_and(edge_index[1] >= i * final_coord.size(1)).logical_and(edge_index[1] < (i + 1) * final_coord.size(1) - anchor_diff)
+                                ] - offset[i] for i in range(batch_size)]
+            if self.structured_seed:
+                n_nodes = batch.n_nodes.clone() - self.encoder.anchor_feat.size(0)
+                # edge_index_without_anchors = edge_index[:, edge_index[0] < target_coord.size(1) - self.encoder.anchor_feat.size(0)]
+                # edge_index_without_anchors = edge_index_without_anchors[:, edge_index_without_anchors[1] < target_coord.size(1) - self.encoder.anchor_feat.size(0)]
+                assert final_coord[:, -self.encoder.anchor_feat.size(0):, :].equal(target_coord[:, -self.encoder.anchor_feat.size(0):, :])
+                loss_per_graph_ot, penalty_per_graph = sliced_ot_loss(final_coord[:, :-self.encoder.anchor_feat.size(0), :], target_coord[:, :-self.encoder.anchor_feat.size(0), :], per_sample_loss=True, penalty=self.loss_fn == 'ot_p', penalty_dist=self.penalty_distance, penalty_dist_min=self.penalty_distance_min, edge_index=edge_index_split, n_nodes=n_nodes)
+            else:
+                loss_per_graph_ot, penalty_per_graph = sliced_ot_loss(final_coord, target_coord, per_sample_loss=True, penalty=self.loss_fn == 'ot_p', penalty_dist=self.penalty_distance, penalty_dist_min=self.penalty_distance_min, edge_index=edge_index_split, n_nodes=batch.n_nodes)
+            final_coord = final_coord.reshape(-1, self.target_coord.size(1))
+            loss_per_graph = loss_per_graph_ot + penalty_per_graph
+            assert loss_per_graph.size(0) == batch_size
+            loss_ot = loss_per_graph.mean()
+            penalty = penalty_per_graph.mean()
+            loss = loss_ot + penalty
+            loss_log = f'{loss_ot:.6f} + {penalty:.6f} = {loss:.6f}'
         else:
             raise ValueError('Invalid loss function')
+        
+        # assert not torch.isnan(loss).any()
+
+        self.pool.update(id_seeds, final_coord, final_node_feat, losses=loss_per_graph)
+
+        best_score = self.trainer.callbacks[-1].best_model_score
+        if best_score is None:
+            best_score = -1
+        best_step = self.trainer.callbacks[-1].best_model_path
+        if best_step is not None and best_step != '':
+            best_step = best_step.split('.')[1].split('-')[-1]
 
         # display & log
-        print('%d \t %s \t %d \t %.6f \t %.2f' %
-              (self.current_epoch, loss_log, batch_size,
-               self.trainer.optimizers[0].param_groups[0]['lr'], self.pool.avg_reps))
+        print('%d \t %s \t %d \t %d \t %.6f \t %.2f \t best=%.6f (%s)' %
+              (self.current_epoch, loss_log, batch_size, dynamic_edge_steps,
+               self.trainer.optimizers[0].param_groups[0]['lr'], self.pool.avg_reps, best_score, best_step))
         self.log('loss', loss, on_step=True, on_epoch=False, batch_size=batch_size)
+        if self.loss_fn == 'local' or self.loss_fn == 'local_enp':
+            self.log('dist_loss', dist_loss, on_step=True, on_epoch=False, batch_size=batch_size)
+            self.log('angle_loss', angle_loss, on_step=True, on_epoch=False, batch_size=batch_size)
+            self.log('nb_loss', nb_loss, on_step=True, on_epoch=False, batch_size=batch_size)
+            self.log('old_loss', old_loss, on_step=True, on_epoch=False, batch_size=batch_size)
+        elif self.loss_fn == 'ot_p':
+            self.log('loss_ot', loss_ot, on_step=True, on_epoch=False, batch_size=batch_size)
+            self.log('penalty', penalty, on_step=True, on_epoch=False, batch_size=batch_size)
+        
+        for name, param in self.named_parameters():
+            if param.grad is not None:
+                assert torch.isfinite(param.grad).all(), f'Gradient of {name} is not finite'
+        for name, param in self.encoder.named_parameters():
+            if param.grad is not None:
+                assert torch.isfinite(param.grad).all(), f'Gradient of {name} is not finite'
+        for layer in self.encoder.egnn.layers:
+            for name, param in layer.named_parameters():
+                if param.grad is not None:
+                    assert torch.isfinite(param.grad).all(), f'Gradient of {name} is not finite'
+
         return loss
 
     def configure_optimizers(self):
@@ -351,25 +581,101 @@ class FixedTargetGAE(pl.LightningModule):
         translate: Optional[bool] = False,
         return_inter_states: Optional[bool] = False,
         progress_bar: Optional[bool] = True,
-        dtype: Optional[torch.dtype] = torch.float64
+        dtype: Optional[torch.dtype] = torch.float64,
+        target_coord: Optional[torch.Tensor] = None
     ):
         self.to(dtype)
         if init_coord is None:
-            init_coord = self.init_coord.clone()
+            if self.init_coord is None:
+                init_coord = torch.empty(self.pool.num_nodes, self.pool.coord_dim, dtype=dtype).normal_(std=self.pool.std).to(self.device)
+            else:
+                # print("Using init coord")
+                init_coord = self.init_coord.clone()
+        
+        if self.ot_permutation:
+            perm = find_best_permutation(init_coord, self.target_coord)
+            init_coord = init_coord[perm]
+        
+        # TODO: Decide whether I want to keep this functionality, put it behind a flag
+        # if self.structured_seed:
+        #     indices = list(range(init_coord.size(0) - self.encoder.anchor_feat.size(0)))
+        #     pairs = list(zip(indices, init_coord))
+        #     sorted_pairs = sorted(pairs, key=lambda x: (x[1][1] * 1).round(decimals=1))
+        #     sorted_pairs = sorted(sorted_pairs, key=lambda x: (x[1][0] * 1).round(decimals=1))
+        #     sorted_indices = [x[0] for x in sorted_pairs] + list(range(init_coord.size(0) - self.encoder.anchor_feat.size(0), init_coord.size(0)))
+        #     init_coord = init_coord[sorted_indices]
+        # else:
+        #     indices = list(range(init_coord.size(0)))
+        #     pairs = list(zip(indices, init_coord))
+        #     sorted_pairs = sorted(pairs, key=lambda x: (x[1][1] * 1).round(decimals=1))
+        #     sorted_pairs = sorted(sorted_pairs, key=lambda x: (x[1][0] * 1).round(decimals=1))
+        #     sorted_indices = [x[0] for x in sorted_pairs]
+        #     init_coord = init_coord[sorted_indices]
+
         if rotate:
             rotation = nn.init.orthogonal_(
                 torch.empty(self.encoder.coord_dim, self.encoder.coord_dim)
             ).to(device=self.device, dtype=dtype)
             init_coord = torch.matmul(rotation, init_coord.T).T
+            if self.beacon:
+                old_anchor_coords = self.anchor_coords.clone()
+                anchor_coords = torch.matmul(rotation, self.anchor_coords.T).T
+                self.anchor_coords = anchor_coords
+                for layer in self.encoder.egnn.layers:
+                    layer.beacon_coords = anchor_coords
         if translate:
             translation = torch.randn(1, self.encoder.coord_dim).to(device=self.device, dtype=dtype)
             init_coord += translation
+            if self.beacon:
+                if not rotate:
+                    old_anchor_coords = self.anchor_coords.clone()
+                self.anchor_coords += translation
+                for layer in self.encoder.egnn.layers:
+                    layer.beacon_coords += translation
+        if target_coord is None:
+            target_coord = self.target_coord
         
+
         n_nodes = torch.tensor([init_coord.size(0)]).to(init_coord.device)
-        edge_index = compute_edge_index(self.edge_index, init_coord, n_nodes, self.relative_edges, self.dynamic_edges, distance=self.edge_distance, n_neighbours=self.edge_num)
+        # edge_index = ot_assignment(init_coord, target_coord)
+        # n_anchors = self.encoder.anchor_coords.size(0) if self.structured_seed else None
+        # edge_index = ot_assignment(init_coord, target_coord, n_anchors=n_anchors, pb=True)
+        edge_index = self.edge_index
+        # edge_index = compute_edge_index(self.edge_index, init_coord, n_nodes, self.relative_edges, self.dynamic_edges, distance=self.edge_distance, n_neighbours=self.edge_num, min_neighbours=self.min_edges)
+
+        # if self.beacon:
+        #     anchor_edges = torch.tensor([[i, j] for i in range(init_coord.size(0)) for j in range(init_coord.size(0), self.anchor_coords.size(0) + init_coord.size(0))], device=edge_index.device)
+        #     # print(anchor_edges.shape)
+        #     if self.update_anchor_feat:
+        #         # Add the reverse edges
+        #         anchor_edges = torch.cat([anchor_edges, anchor_edges.flip(1)], dim=0)
+        #     if self.anchor_dist is not None and self.anchor_dist >= 0:
+        #         # Keep only those edges with a distance smaller than anchor_dist
+        #         all_coords = torch.cat([init_coord, self.anchor_coords])
+        #         dist = torch.norm(all_coords[anchor_edges[:, 0]] - all_coords[anchor_edges[:, 1]], dim=-1)
+        #         anchor_edges = anchor_edges[dist < self.anchor_dist]
+        #     anchor_edges = EdgeIndex(anchor_edges.T.contiguous())
+        # else:
+        #     anchor_edges = None
+
         out = self.encoder(
             edge_index, coord=init_coord, node_feat=init_node_feat, n_steps=n_steps,
             return_inter_states=return_inter_states, progress_bar=progress_bar)
+    
+        if rotate:
+            if self.beacon:
+                self.anchor_coords = old_anchor_coords
+                for layer in self.encoder.egnn.layers:
+                    layer.beacon_coords = old_anchor_coords
+                return out, rotation, anchor_coords
+            else:
+                return out, rotation, None
+        elif translate:
+            if self.beacon:
+                self.anchor_coords = old_anchor_coords
+                for layer in self.encoder.egnn.layers:
+                    layer.beacon_coords = old_anchor_coords
+
         return out
 
     @torch.no_grad()
@@ -386,9 +692,14 @@ class FixedTargetGAE(pl.LightningModule):
             s1, s2 = self.args.n_min_steps, self.args.n_max_steps
             n_step_list = [s1, (s1 + s2) // 2, s2] + list(range(100, 1100, 100)) + list(range(10_000, 110_000, 10_000))
         if init_coord is None:
-            init_coord = self.init_coord.clone()
+            if self.init_coord is None:
+                init_coord = torch.empty(self.pool.num_nodes, self.pool.coord_dim, dtype=dtype).normal_(std=self.pool.std)
+            else:
+                init_coord = self.init_coord.clone()
         if init_node_feat is None:
             init_node_feat = self.init_coord.new_ones(init_coord.shape[0], self.encoder.node_dim)
+            if self.structured_seed:
+                init_node_feat[-self.anchor_feat.size(0):] = self.anchor_feat
         coord, node_feat = init_coord, init_node_feat
         results, progress_bar = dict(), tqdm(range(max(n_step_list) + 1))
         for n_step in progress_bar:

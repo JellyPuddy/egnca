@@ -3,6 +3,7 @@ from torch_geometric.utils import negative_sampling
 from torch_geometric import EdgeIndex
 import torch_geometric.transforms as T
 from scipy.spatial import Delaunay
+from PIL import ImageFont, ImageDraw, Image
 
 from typing import Optional
 import networkx as nx
@@ -245,7 +246,7 @@ def load_pygsp_graph(
 
     if anchor_coords is not None:
         # Add an edge from each anchor to each node
-        anchor_edges = torch.tensor([[i, j] for i in range(graph.N) for j in range(graph.N, graph.N + coord_dim + 1)])
+        anchor_edges = torch.tensor([[i, j] for i in range(graph.N) for j in range(graph.N, graph.N + anchor_coords.size(0))])
         # Add the reverse edges
         anchor_edges = torch.cat([anchor_edges, anchor_edges.flip(1)], dim=0)
         # Keep only those edges with a distance smaller than anchor_dist
@@ -260,14 +261,19 @@ def create_cube_cloud(
     length: Optional[int] = 8,
     radius: Optional[float] = 0.15,
     anchor_coords: Optional[torch.Tensor] = None,
-    anchor_dist: Optional[float] = 0.25
+    anchor_dist: Optional[float] = 0.25,
+    anchor_scale: Optional[float] = 1.0
 ):
-    values = torch.linspace(0, 1, steps=length)
+    values = torch.linspace(-1, 1, steps=length) / 2
     coord = torch.stack(torch.meshgrid(values, values, values, indexing='xy')).reshape(3, -1).T
     dist = torch.norm(coord - coord.unsqueeze(1), dim=-1) < radius
     dist.fill_diagonal_(0)
 
     if anchor_coords is not None:
+        # # Make sure anchors are aligned with the cube
+        # anchor_coords = anchor_coords / ((anchor_coords.max() - anchor_coords.min()) / (coord.max() - coord.min()))
+        # anchor_coords = (anchor_coords + coord.mean())
+        # anchor_coords *= anchor_scale
         # Add anchor points
         coord = torch.cat([coord, anchor_coords], dim=0)
 
@@ -275,7 +281,7 @@ def create_cube_cloud(
 
     if anchor_coords is not None:
         # Add an edge from each anchor to each node
-        anchor_edges = torch.tensor([[i, j] for i in range(coord.size(0) - 4) for j in range(coord.size(0) - 4, coord.size(0))])
+        anchor_edges = torch.tensor([[i, j] for i in range(coord.size(0) - anchor_coords.size(0)) for j in range(coord.size(0) - anchor_coords.size(0), coord.size(0))])
         # Add the reverse edges
         anchor_edges = torch.cat([anchor_edges, anchor_edges.flip(1)], dim=0)
         # Keep only those edges with a distance smaller than anchor_dist
@@ -283,7 +289,7 @@ def create_cube_cloud(
         anchor_edges = anchor_edges[dist < anchor_dist]
         edge_index = EdgeIndex(torch.cat([edge_index, anchor_edges.T], dim=1))
 
-    return coord, edge_index
+    return coord, edge_index, anchor_coords
 
 
 def create_pyramid(
@@ -308,7 +314,7 @@ def create_pyramid(
 
     if anchor_coords is not None:
         # Add an edge from each anchor to each node
-        anchor_edges = torch.tensor([[i, j] for i in range(coord.size(0) - 4) for j in range(coord.size(0) - 4, coord.size(0))])
+        anchor_edges = torch.tensor([[i, j] for i in range(coord.size(0) - anchor_coords.size(0)) for j in range(coord.size(0) - anchor_coords.size(0), coord.size(0))])
         # Add the reverse edges
         anchor_edges = torch.cat([anchor_edges, anchor_edges.flip(1)], dim=0)
         # Keep only those edges with a distance smaller than anchor_dist
@@ -332,7 +338,7 @@ def create_line(n_points=64, anchor_coords=None, anchor_dist=0.25):
 
     if anchor_coords is not None:
         # Add an edge from each anchor to each node
-        anchor_edges = torch.tensor([[i, j] for i in range(coord.size(0) - 3) for j in range(coord.size(0) - 3, coord.size(0))])
+        anchor_edges = torch.tensor([[i, j] for i in range(coord.size(0) - anchor_coords.size(0)) for j in range(coord.size(0) - anchor_coords.size(0), coord.size(0))])
         # Add the reverse edges
         anchor_edges = torch.cat([anchor_edges, anchor_edges.flip(1)], dim=0)
         # Keep only those edges with a distance smaller than anchor_dist
@@ -342,29 +348,90 @@ def create_line(n_points=64, anchor_coords=None, anchor_dist=0.25):
 
     return coord, edge_index
 
+def gen_points(s, font_size=30):
+    font = ImageFont.truetype('C:/Windows/Fonts/Arial.ttf', font_size)
+    w, h = font.getsize(s)
+    im = Image.new('L', (w, h))
+    draw = ImageDraw.Draw(im)
+    draw.text((0, 0), s, fill=255, font=font)
+    im = np.uint8(im)
+    y, x = np.float32(im.nonzero())
+    pos = np.column_stack([x, y])
+    if len(pos) > 0:
+        pos -= (w/2, h/2)
+        pos[:,1] *= -1
+        pos /= font_size
+        pos -= pos.min(axis=0)
+        pos /= pos.max() / 2
+        pos -= pos.max(axis=0) / 2
+    return pos
+
+def text_to_graph(s, font_size=30, distance=0.05, anchor_structure=None, anchor_dist=None, anchor_scale=None):
+    pos = gen_points(s, font_size)
+    print(pos.max(axis=0), pos.min(axis=0))
+    print(np.max([pos.max(axis=0), abs(pos.min(axis=0))], axis=0))
+    pos = torch.tensor(pos, dtype=torch.float32)# / np.max([pos.max(axis=0), abs(pos.min(axis=0))], axis=0)
+    edge_index = EdgeIndex(torch.ones(pos.size(0), pos.size(0)).tril(-1).nonzero().T.contiguous())
+    dist = torch.norm(pos[edge_index[0, :]] - pos[edge_index[1, :]], dim=-1)
+    print(dist[dist < distance].unique())
+    edge_index = edge_index[:, dist < distance]
+
+    dimensions = 2
+    anchor_coords = get_anchor_coords(anchor_structure, dimensions, scale=anchor_scale)
+    pos, edge_index = augment_graph(pos, edge_index, anchor_coords, anchor_dist)
+
+    return pos, edge_index, anchor_coords
+
+def augment_graph(
+    coord: torch.Tensor,
+    edge_index: EdgeIndex,
+    anchor_coords: Optional[torch.Tensor] = None,
+    anchor_dist: Optional[float] = 0.25
+):
+    if anchor_coords is None:
+        return coord, edge_index
+    
+    # Add anchor points
+    coord = torch.cat([coord, anchor_coords], dim=0)
+    # Add an edge from each anchor to each node
+    anchor_edges = torch.tensor([[i, j] for i in range(coord.size(0) - anchor_coords.size(0)) for j in range(coord.size(0) - anchor_coords.size(0), coord.size(0))])
+    # Add the reverse edges
+    anchor_edges = torch.cat([anchor_edges, anchor_edges.flip(1)], dim=0)
+    # Keep only those edges with a distance smaller than anchor_dist
+    dist = torch.norm(coord[anchor_edges[:, 0]] - coord[anchor_edges[:, 1]], dim=-1)
+    anchor_edges = anchor_edges[dist < anchor_dist]
+    edge_index = EdgeIndex(torch.cat([edge_index, anchor_edges.T], dim=1))
+
+    return coord, edge_index
+
 
 def get_geometric_graph(
     name: str,
     anchor_structure: Optional[torch.Tensor] = None,
     anchor_dist: Optional[float] = 0.25,
+    anchor_scale: Optional[float] = 1.0,
     **kwargs
 ):
     dimensions = 2 if name in ['Grid2d', 'Line'] else 3
-    anchor_coords = get_anchor_coords(anchor_structure, dimensions)
+    anchor_coords = get_anchor_coords(anchor_structure, dimensions, scale=anchor_scale)
 
     if name == 'Line':
         coord, edge_index = create_line(anchor_coords=anchor_coords, anchor_dist=anchor_dist)
     elif name == 'Cube':
-        coord, edge_index = create_cube_cloud(anchor_coords=anchor_coords, anchor_dist=anchor_dist)
+        coord, edge_index, anchor_coords = create_cube_cloud(anchor_coords=anchor_coords, anchor_dist=anchor_dist, anchor_scale=anchor_scale)
     elif name == 'Pyramid':
         coord, edge_index = create_pyramid(anchor_coords=anchor_coords, anchor_dist=anchor_dist)
     elif name in ['Bunny', 'Grid2d', 'Torus']:
         coord, edge_index = load_pygsp_graph(name, anchor_coords, anchor_dist=anchor_dist, **kwargs)
     else:
-        if anchor_coords is not None:
-            raise NotImplementedError('Structured seeds are not (yet) supported for this graph.')
-        coord, edge_index = torch.load('./data/clouds/%s.pt' % name)
+        try:
+            coord, edge_index = torch.load('./data/clouds/%s.pt' % name)
+        except FileNotFoundError:
+            coord, edge_index = torch.load('../data/clouds/%s.pt' % name)
+        if dimensions != coord.size(1):
+            anchor_coords = get_anchor_coords(anchor_structure, coord.size(1), scale=anchor_scale)
         edge_index = EdgeIndex(edge_index)
+        coord, edge_index = augment_graph(coord, edge_index, anchor_coords, anchor_dist)
     return coord, edge_index, anchor_coords
 
 

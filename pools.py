@@ -2,8 +2,6 @@ from typing import Optional
 import numpy as np
 import torch
 
-from utils.utils import get_anchor_coords
-
 
 def damage_coord(
     coord: Optional[torch.Tensor],
@@ -125,6 +123,7 @@ class GaussianSeedPool:
         std: Optional[float] = 0.5,
         sparse: Optional[bool] = True,
         fixed_init_coord: Optional[bool] = True,
+        init_coord: Optional[torch.Tensor] = None,
         std_damage: Optional[bool] = 0.0,
         radius_damage: Optional[float] = None,
         device: Optional[str] = 'cuda',
@@ -147,7 +146,10 @@ class GaussianSeedPool:
         self.structured_seed = structured_seed
 
         if fixed_init_coord:
-            self.init_coord = torch.empty(num_nodes, coord_dim).normal_(std=std)
+            if init_coord is None:
+                self.init_coord = torch.empty(num_nodes, coord_dim).normal_(std=std)
+            else:
+                self.init_coord = init_coord
             self.pool_coord = self.init_coord.clone().unsqueeze(0).repeat(pool_size, 1, 1)
         else:
             self.init_coord = None
@@ -156,9 +158,11 @@ class GaussianSeedPool:
         if structured_seed:
             assert anchor_feat is not None
             self.anchor_feat = anchor_feat
+            self.anchor_coords = anchor_coords
             if fixed_init_coord:
                 # Replace the last coords with the anchor coords.
                 self.init_coord[-(anchor_coords.size(0)):] = anchor_coords
+            self.pool_coord[:, -anchor_coords.size(0):] = anchor_coords
         self.pool_node_feat = self.init_node_feat.clone().unsqueeze(0).repeat(pool_size, 1, 1)
 
         self.pool_loss = torch.full((pool_size, ), torch.inf)
@@ -186,6 +190,8 @@ class GaussianSeedPool:
         node_feat[id_reset] = self.init_node_feat.clone().to(self.device)
         if self.init_coord is None:
             coord[id_reset].normal_(std=self.std)
+            if self.structured_seed:
+                coord[id_reset][-self.anchor_coords.size(0):] = self.anchor_coords
         else:
             coord[id_reset] = self.init_coord.clone().to(self.device)
         if self.structured_seed:

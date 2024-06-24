@@ -5,22 +5,29 @@ from typing import Optional, List, Union
 import numpy as np
 import torch
 from torch_geometric import EdgeIndex
+from tqdm.auto import tqdm
+import functools
 
 
 def damage_coord(
     coord: Optional[torch.Tensor],
     std: Optional[float] = 0.05,
-    radius: Optional[float] = None
+    radius: Optional[float] = None,
+    n_anchors: Optional[int] = 0
 ):
     assert coord.ndim == 2 or coord.ndim == 3
     if coord.ndim == 2:
         coord = coord.unsqueeze(0)
+    if n_anchors:
+        anchors = coord[:, :n_anchors]
     if radius is None:
         coord = coord + torch.empty_like(coord).normal_(std=std)
     else:
         id_center = torch.randint(coord.size(1), size=(coord.size(0),))
         dist = ((coord - coord[torch.arange(len(coord)), id_center].unsqueeze(1)) ** 2).sqrt().sum(-1, keepdim=True)
         coord = coord + (dist < radius) * torch.empty_like(coord).normal_(std=std)
+    if n_anchors:
+        coord[:, :n_anchors] = anchors
     return coord.squeeze()
 
 
@@ -242,27 +249,45 @@ def compute_edge_index(
     dynamic_edges: bool,
     distance: Optional[float] = 0.15,
     n_neighbours: Optional[int] = None,
-    in_step: Optional[bool] = False
+    min_neighbours: Optional[int] = None,
+    in_step: Optional[bool] = False,
+    compute_gradients: Optional[bool] = False,
+    n_anchors: Optional[int] = 0,
+    anchor_distance: Optional[float] = None
 ):
     # TODO handle structured seed
     assert n_neighbours or distance
 
-    if not relative_edges:
+    if not relative_edges and not in_step:
         return default
     
     if not dynamic_edges and in_step:
         return default
+    
+    handle_anchors = n_anchors > 0 and anchor_distance is not None and anchor_distance != distance
+    
+    context = torch.enable_grad() if compute_gradients else torch.no_grad()
 
-    with torch.no_grad():
+    with context:
         # Reshape the coordinates from (sum(n_nodes), coord_dimension) to (batch_size, max_n_nodes, coord_dimension)
         max_n_nodes = n_nodes.max()
+        if handle_anchors:
+            max_n_nodes -= n_anchors
         reshaped_coord = torch.zeros(len(n_nodes), max_n_nodes, coord.size(1)).to(coord.device)
+        anchor_coords = torch.zeros(len(n_nodes), n_anchors, coord.size(1)).to(coord.device) if handle_anchors else None
         offset = [0] + torch.Tensor.tolist(n_nodes[:-1].cumsum(0))
         for i, o, n in zip(range(len(n_nodes)), offset, n_nodes):
-            reshaped_coord[i, :n] = coord[o:o+n]
+            if handle_anchors:
+                reshaped_coord[i, :n - n_anchors] = coord[o:o+n - n_anchors]
+                anchor_coords[i] = coord[o + n - n_anchors:o+n]
+            else:
+                reshaped_coord[i, :n] = coord[o:o+n]
 
         # Compute the distance matrix per batch
         dist_matrix = torch.cdist(reshaped_coord, reshaped_coord)
+        if handle_anchors:
+            dist_matrix_anchors = torch.cdist(reshaped_coord, anchor_coords)
+            n_nodes = torch.LongTensor([n_node - n_anchors for n_node in n_nodes])
 
         # Create the mask for the edges
         mask = fully_connected_adj(n_nodes=n_nodes, sparse=False, triu=False).to(coord.device).bool()
@@ -276,10 +301,18 @@ def compute_edge_index(
             mask = mask & (dist_matrix <= topk.values[:, :, -1].unsqueeze(2))
         if distance:
             mask = mask & (dist_matrix <= distance)
+        if min_neighbours:
+            topk = torch.topk(dist_matrix, min_neighbours, largest=False)
+            mask = mask | (dist_matrix <= topk.values[:, :, -1].unsqueeze(2))
 
         # Create the edge_index, taking into account that the first node of batch 2 should have index num_nodes, the first node of batch 3 should have index 2 * num_nodes, and so on
         edge_index = [torch.nonzero(mask[i], as_tuple=False).t() + offset[i] for i in range(len(n_nodes))]
         edge_index = torch.cat(edge_index, dim=1)
+
+        if handle_anchors:
+            edge_index_anchors = [(torch.nonzero(dist_matrix_anchors[i] <= anchor_distance, as_tuple=False) + offset[i] + torch.LongTensor([0, n_nodes[i]]).to(coord.device)).t() for i in range(len(n_nodes))]
+            edge_index_anchors = torch.cat(edge_index_anchors, dim=1)
+            edge_index = torch.cat([edge_index, edge_index_anchors], dim=1)
 
     # Move edge_index to the same device as init_coord
     edge_index = edge_index.to(coord.device)
@@ -288,23 +321,27 @@ def compute_edge_index(
 def get_anchor_coords(
     anchor_structure: str,
     coord_dim: int,
+    scale: int = 1
 ):
     if anchor_structure is None:
         return None
     elif anchor_structure == 'simplex':
         if coord_dim == 2:
             # Add anchor nodes: equilateral triangle
-            return torch.tensor([[1, 0], [-0.5, 0.5 * 3 ** 0.5], [-0.5, -0.5 * 3 ** 0.5]])
-        else:
-            # Add anchor nodes: tetrahedron
-            return torch.tensor([[1, 0, -0.5 * 2 ** 0.5], [-1, 0, -0.5 * 2 ** 0.5], [0, 1, 0.5 * 2 ** 0.5], [0, -1, 0.5 * 2 ** 0.5]])
-    elif anchor_structure == 'corners':
-        if coord_dim == 2:
-            return torch.Tensor([[1, 1], [1, -1], [-1, 1], [-1, -1]])
+            return torch.tensor([[1, 0], [-0.5, 0.5 * 3 ** 0.5], [-0.5, -0.5 * 3 ** 0.5]]) * scale
         elif coord_dim == 3:
-            return torch.Tensor([[1, 1, 1], [1, -1, 1], [-1, 1, 1], [-1, -1, 1], [1, 1, -1], [1, -1, -1], [-1, 1, -1], [-1, -1, -1]])
+            # Add anchor nodes: tetrahedron
+            return torch.tensor([[1, 0, -0.5 * 2 ** 0.5], [-1, 0, -0.5 * 2 ** 0.5], [0, 1, 0.5 * 2 ** 0.5], [0, -1, 0.5 * 2 ** 0.5]]) * scale
         else:
-            raise NotImplementedError("The corners anchor structure is only implemented for 2D and 3D coordinates")
+            raise ValueError("Simplex anchors are only supported for 2D and 3D coordinates")
+    elif anchor_structure == 'corners':
+        # Add anchor nodes: all 2^coord_dim corners of the unit cube (or whatever the dimensional equivalent of a cube is)
+        coords = []
+        for i in range(2 ** coord_dim):
+            coords.append([1 if i & (1 << j) else -1 for j in range(coord_dim)])
+        return torch.tensor(coords, dtype=torch.float32) * scale
+    elif anchor_structure == '2corners':
+        return torch.stack([torch.ones(coord_dim, dtype=torch.float32), -torch.ones(coord_dim, dtype=torch.float32)]) * scale
     else:
         raise ValueError("Invalid anchor structure. Must be either 'simplex' or 'corners'")
 
@@ -330,42 +367,123 @@ def triplets(
     idx_j = col.repeat_interleave(num_triplets)
     idx_k = adj_row.nonzero(as_tuple=True)[1]
     mask = idx_j != idx_k  # Remove j == k triplets.
-    # idx_i, idx_j, idx_k = idx_i[mask], idx_j[mask], idx_k[mask]
-    idx_i, idx_j, idx_k = idx_i.index_select(0, mask.nonzero(as_tuple=True)[0]), idx_j.index_select(0, mask.nonzero(as_tuple=True)[0]), idx_k.index_select(0, mask.nonzero(as_tuple=True)[0])
+    idx_i, idx_j, idx_k = idx_i[mask], idx_j[mask], idx_k[mask]
+    # idx_i, idx_j, idx_k = idx_i.index_select(0, mask.nonzero(as_tuple=True)[0]), \
+    #                       idx_j.index_select(0, mask.nonzero(as_tuple=True)[0]), \
+    #                       idx_k.index_select(0, mask.nonzero(as_tuple=True)[0])
 
     return idx_i, idx_j, idx_k
+
+def angle_btw(
+    v1: torch.Tensor,
+    v2: torch.Tensor
+):
+    u1 = v1 / torch.linalg.norm(v1, dim=-1, keepdim=True).clamp(min=1e-5)
+    u2 = v2 / torch.linalg.norm(v2, dim=-1, keepdim=True).clamp(min=1e-5)
+
+    y = u1 - u2
+    x = u1 + u2
+
+    a0 = 2 * torch.arctan(torch.linalg.norm(y, dim=-1).clamp(min=1e-5) / torch.linalg.norm(x, dim=-1).clamp(min=1e-5))
+
+    mask1 = (~torch.signbit(a0)) | torch.signbit(torch.pi - a0)
+    mask2 = torch.signbit(a0)
+    mask3 = ~(mask1 | mask2)
+
+    angle = torch.zeros_like(a0)
+    angle[mask1] = a0[mask1]
+    angle[mask2] = torch.tensor(0.0, device=a0.device, dtype=a0.dtype)
+    angle[mask3] = torch.pi
+
+    return angle
+
+def directed_angle(
+    a: torch.Tensor,
+    b: torch.Tensor
+):
+    if a.size(-1) == 3:
+        raise ValueError("Directed angle is not defined for 3D vectors")
+    dot = (a * b).sum(-1)
+    det = torch.det(torch.stack([a, b], dim=1))
+    angle = torch.atan2(det, dot)
+    return angle
 
 def calculate_angles(
     coord: torch.Tensor,
     edge_index: EdgeIndex,
     num_nodes: int,
-    return_indices: Optional[bool] = False
+    angle_type: Optional[str] = 'undirected',
+    return_indices: Optional[bool] = False,
+    coord_ik: Optional[torch.Tensor] = None,
+    coord_ij: Optional[torch.Tensor] = None
 ):
+    assert angle_type in ['directed', 'undirected', 'unstable', 'wrong', 'dot']
     # TODO ignore anchors
-    idx_i, idx_j, idx_k = triplets(
-        edge_index, num_nodes=num_nodes)
+    if coord_ik is None or coord_ij is None:
+        idx_i, idx_j, idx_k = triplets(edge_index, num_nodes=num_nodes)
+        if torch.isnan(idx_i).any() or torch.isnan(idx_j).any() or torch.isnan(idx_k).any():
+            print(idx_i)
+            print(idx_j)
+            print(idx_k)
+            print(edge_index)
+            print(num_nodes)
+            print(coord)
+            print(coord_ik)
+            print(coord_ij)
+            raise ValueError("NaN in triplets")
 
-    coord_ik, coord_ij = coord.index_select(0, idx_k) - coord.index_select(0, idx_i), coord.index_select(0, idx_j) - coord.index_select(0, idx_i)
+        coord_ik, coord_ij = coord[idx_k] - coord[idx_i], coord[idx_j] - coord[idx_i]
+        # coord_ik, coord_ij = coord.index_select(0, idx_k) - coord.index_select(0, idx_i), coord.index_select(0, idx_j) - coord.index_select(0, idx_i)
 
-    # dot_product = (coord_ij * coord_ik).sum(dim=-1)
-    # norm_product = (coord_ij.norm(dim=-1) * coord_ik.norm(dim=-1)).clamp(min=1e-5)
-    # eps = torch.tensor(1e-7, device=coord.device)
-    # angle = torch.arccos((dot_product / (norm_product)).clamp(-1 + eps, 1 - eps)) / torch.pi
-    angle = 2 * torch.atan2(
-        torch.norm(coord_ik * coord_ij, dim=1),
-        torch.norm(coord_ik, dim=1) * torch.norm(coord_ij, dim=1)
-    ) / torch.pi
+    if angle_type == 'dot':
+        angle = (coord_ij * coord_ik).sum(dim=-1).clamp(min=1e-5) / (coord_ij.norm(dim=-1) * coord_ik.norm(dim=-1)).clamp(min=1e-5)
+    if angle_type == 'unstable':
+        dot_product = (coord_ij * coord_ik).sum(dim=-1)
+        norm_product = (coord_ij.norm(dim=-1) * coord_ik.norm(dim=-1)).clamp(min=1e-5)
+        eps = torch.tensor(1e-7, device=coord.device)
+        angle = torch.arccos((dot_product / (norm_product)).clamp(-1 + eps, 1 - eps)) / torch.pi
+    elif angle_type == 'wrong':
+        angle = 2 * torch.atan2(
+            torch.norm(coord_ik * coord_ij, dim=1),
+            torch.norm(coord_ik, dim=1) * torch.norm(coord_ij, dim=1)
+        ) / torch.pi
+    elif angle_type == 'undirected':
+        angle = angle_btw(coord_ik, coord_ij) / torch.pi
+    else:
+        angle = directed_angle(coord_ik, coord_ij) / torch.pi
     
     if return_indices:
         return angle, (idx_i, idx_j, idx_k)
 
     return angle
 
+# https://stackoverflow.com/questions/55110047/finding-non-intersection-of-two-pytorch-tensors
+def set_diff_2d(
+    t1: torch.Tensor,
+    t2: torch.Tensor,
+    assume_unique: Optional[bool] = False
+):
+    """
+    Set difference of two 2D tensors.
+    Returns the unique values in t1 that are not in t2.
+
+    """
+    if not assume_unique:
+        t1 = torch.unique(t1, dim=0)
+        t2 = torch.unique(t2, dim=0)
+    return t1[(t1[:, None] != t2).any(dim=2).all(dim=1)]
+
 def local_loss(
     coord_1: torch.Tensor,
     coord_2: torch.Tensor,
     edge_index: EdgeIndex,
+    angle_type: Optional[str] = 'undirected',
+    batch_size: Optional[int] = -1,
+    extra_neighbours_penalty: Optional[bool] = True,
+    penalty_dist: Optional[float] = 0.25,
+    split_losses: Optional[bool] = True
 ):
+    n_coords = coord_2.size(0)
     if coord_1.shape != coord_2.shape:
         if coord_1.shape[0] % coord_2.shape[0] == 0:
             coord_2 = coord_2.repeat(coord_1.shape[0] // coord_2.shape[0], 1)
@@ -377,27 +495,42 @@ def local_loss(
     dist_2 = torch.norm(coord_2[edge_index[0]] - coord_2[edge_index[1]], dim=-1)
     
     # Compute the angles between each triplet of nodes
-    angle_1 = calculate_angles(coord_1, edge_index, coord_1.size(0))
-    angle_2 = calculate_angles(coord_2, edge_index, coord_2.size(0))
+    angle_1 = calculate_angles(coord_1, edge_index, coord_1.size(0), angle_type)
+    angle_2 = calculate_angles(coord_2, edge_index, coord_2.size(0), angle_type)
     
     # Compute the loss
-    dist_loss = ((dist_1 - dist_2) ** 2).mean() ** 0.5
-    angle_loss = ((angle_1 - angle_2) ** 2).mean() ** 0.5
-    return dist_loss, angle_loss
+    # dist_loss = ((dist_1 - dist_2) ** 2).mean() ** 0.5
+    # angle_loss = ((angle_1 - angle_2) ** 2).mean() ** 0.5
+    dist_loss_per_edge = torch.nn.functional.l1_loss(dist_1, dist_2, reduction='none')
+    angle_loss_per_edge = torch.nn.functional.l1_loss(angle_1, angle_2, reduction='none')
+    dist_loss_per_graph = torch.stack([dlpe.mean() for dlpe in dist_loss_per_edge.chunk(batch_size)]) if batch_size > 0 else dist_loss_per_edge.mean().unsqueeze(0)
+    angle_loss_per_graph = torch.stack([alpe.mean() for alpe in angle_loss_per_edge.chunk(batch_size)]) if batch_size > 0 else angle_loss_per_edge.mean().unsqueeze(0)
 
-def get_fourrier_features(
-    number: torch.Tensor,
-    n_features: int = 8,
-):
-    if number.ndim == 1:
-        number = number.unsqueeze(-1)
-    
-    # Compute the fourrier features
-    B = torch.normal(0, 2, size=(n_features, 1), device=number.device, dtype=number.dtype)
-    fourrier_features = torch.sin(2 * np.pi * number @ B.T)
-    return fourrier_features
+    if extra_neighbours_penalty:
+        # Somehow add a loss term penalizing the model when nodes that shouldn't be withing a certain distance are within that distance
+        n_nodes = torch.LongTensor([n_coords for _ in range(batch_size)]) if batch_size > 0 else torch.LongTensor([n_coords])
+        close_edges = compute_edge_index(None, coord_1, n_nodes, relative_edges=True, dynamic_edges=False, distance=penalty_dist, n_neighbours=None, in_step=False, compute_gradients=True)
+        unconnected_edges = set_diff_2d(close_edges.T, edge_index.T, assume_unique=True).T
+        # print(unconnected_edges.shape)
+        # print(close_edges.shape)
+        # print(edge_index.shape)
+        # print(unconnected_edges)
+        if unconnected_edges.size(1) == 0:
+            dist_loss_unconnected_edges = torch.tensor(0.0, device=coord_1.device).unsqueeze(0)
+        else:
+            dist_unconnected_edges = torch.norm(coord_1[unconnected_edges[0]] - coord_1[unconnected_edges[1]], dim=-1)
+            dist_loss_unconnected_edges = torch.nn.functional.relu(penalty_dist - dist_unconnected_edges).mean().unsqueeze(0)
+        # print(dist_loss_unconnected_edges)
+        # print(dist_unconnected_edges.mean())
+    else:
+        dist_loss_unconnected_edges = torch.tensor(0.0, device=coord_1.device).unsqueeze(0)
 
-def init_random_seeds(seed: int = 42):
+    if split_losses:
+        return dist_loss_per_graph, angle_loss_per_graph, dist_loss_unconnected_edges
+    else:
+        return dist_loss_per_graph + angle_loss_per_graph + dist_loss_unconnected_edges
+
+def init_random_seeds(seed: int = 42, deterministic=True):
     """
     Seed all random generators and enforce deterministic algorithms to
     guarantee reproducible results (may limit performance).
@@ -407,6 +540,239 @@ def init_random_seeds(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.use_deterministic_algorithms(True, warn_only=True)
+    if deterministic:
+        torch.use_deterministic_algorithms(True, warn_only=True)
     torch.backends.cudnn.benchmark = False
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+
+class RangeLoss(torch.nn.Module):
+    def __init__(self, min_val, max_val):
+        super(RangeLoss, self).__init__()
+        self.min_val = min_val
+        self.max_val = max_val
+    
+    def forward(self, output, target):
+        criterion = torch.nn.MSELoss(reduction='none')
+        loss_min = criterion(output, self.min_val * torch.ones_like(output))
+        loss_max = criterion(output, self.max_val * torch.ones_like(output))
+        mask_min = (output < self.min_val).float()
+        mask_max = (output > self.max_val).float()
+        loss = (loss_min * mask_min + loss_max * mask_max).mean()
+        return loss
+
+class SigmoidRangeLoss(torch.nn.Module):
+    def __init__(self, min_val, max_val, shift=0.8, mult=8):
+        self.min_val = min_val
+        self.max_val = max_val
+        self.shift = shift
+        self.mult = mult
+    
+    def forward(self, output):
+        loss = sigmoid((output - self.shift - self.max_val) * self.mult) + sigmoid((output + self.shift - self.min_val) * -self.mult)
+        return loss.mean()
+
+def sliced_ot_loss(
+    coord_1: torch.Tensor,
+    coord_2: torch.Tensor,
+    n_proj: int = 128 * 8,
+    per_sample_loss: Optional[bool] = False,
+    penalty: Optional[bool] = False,
+    penalty_dist: Optional[float] = 0.25,
+    penalty_dist_min: Optional[float] = 0.1,
+    edge_index: Optional[List[EdgeIndex]] = None,
+    split_losses: Optional[bool] = True,
+    n_nodes: Optional[torch.LongTensor] = None,
+):
+    assert coord_1.ndim == coord_2.ndim == 3 or coord_1.ndim == coord_2.ndim == 2
+    if penalty: assert edge_index is not None
+    if coord_1.ndim == 2:
+        coord_1 = coord_1.unsqueeze(0)
+        coord_2 = coord_2.unsqueeze(0)
+    assert coord_1.size(0) == coord_2.size(0) and coord_1.size(-1) == coord_2.size(-1)
+
+    proj = torch.nn.functional.normalize(
+        torch.randn(coord_1.size(0), coord_1.size(2), n_proj, dtype=coord_1.dtype).to(coord_1.device), dim=1)
+    proj_1 = torch.sort(torch.bmm(coord_1, proj).permute(0, 2, 1), dim=-1)[0]
+    proj_2 = torch.sort(torch.bmm(coord_2, proj).permute(0, 2, 1), dim=-1)[0]
+    if proj_1.size(-1) != proj_2.size(-1):
+        proj_2 = torch.nn.functional.interpolate(proj_2, proj_1.size(-1), mode='nearest')
+    dims = [1, 2] if per_sample_loss else [0, 1, 2]
+
+    loss = torch.square(proj_1 - proj_2).mean(dim=dims)
+
+    assert not torch.isnan(loss).any()
+
+    if penalty:
+        if n_nodes is not None:
+            penalty = torch.zeros(len(n_nodes), device=coord_1.device)
+            # offset = torch.cat([torch.zeros(1, dtype=torch.long).to(n_nodes.device), n_nodes.cumsum(0)])
+            for i in range(len(n_nodes)):
+                # batch_edge_index = edge_index[:, (edge_index[0] >= offset[i]) & (edge_index[0] < offset[i + 1])] - offset[i]
+                batch_edge_index = edge_index[i]
+                dist = torch.norm(coord_1[i][batch_edge_index[0]] - coord_1[i][batch_edge_index[1]], dim=-1)
+                # batch_penalty = torch.nn.functional.relu(dist - penalty_dist).mean()
+                # batch_penalty += torch.nn.functional.relu(penalty_dist_min - dist).mean()
+                if np.abs(penalty_dist - penalty_dist_min) < 1e-5:
+                    batch_penalty = ((dist - penalty_dist) ** 2).mean()
+                else:
+                    batch_penalty = (torch.nn.functional.relu(dist - penalty_dist) ** 2).mean()
+                    batch_penalty += (torch.nn.functional.relu(penalty_dist_min - dist) ** 2).mean()
+                    # batch_penalty = (torch.nn.functional.silu(dist - penalty_dist) ** 2).mean()
+                    # batch_penalty += (torch.nn.functional.silu(penalty_dist_min - dist) ** 2).mean()
+                    # batch_penalty = torch.zeros_like(dist)
+                    # outside_range = (dist > penalty_dist) | (dist < penalty_dist_min)
+                    # batch_penalty[outside_range] = (dist[outside_range] - penalty_dist) ** 2
+                    # batch_penalty = batch_penalty.mean()
+                    # batch_penalty = (torch.nn.functional.sigmoid((dist - shift - penalty_dist) * mult) + torch.nn.functional.sigmoid((dist + shift - penalty_dist_min) * -mult)).mean()
+                penalty[i] = batch_penalty
+            if not per_sample_loss:
+                penalty = penalty.mean()
+        else:
+            edge_index = edge_index.squeeze(0)
+            dist = torch.norm(coord_1[0][edge_index[0]] - coord_1[0][edge_index[1]], dim=-1)
+            # penalty = torch.nn.functional.relu(dist - penalty_dist).mean()
+            # penalty += torch.nn.functional.relu(penalty_dist_min - dist).mean()
+            if np.abs(penalty_dist - penalty_dist_min) < 1e-5:
+                penalty = ((dist - penalty_dist) ** 2).mean()
+            else:
+                # TODO replace relu with smooth function. EG sigmoid. Make sure negative numbers become (almost) 0, while keeping some slope for positive numbers
+                penalty = (torch.nn.functional.relu(dist - penalty_dist) ** 2).mean()
+                penalty += (torch.nn.functional.relu(penalty_dist_min - dist) ** 2).mean()
+                # penalty = (torch.nn.functional.silu(dist - penalty_dist) ** 2).mean()
+                # penalty += (torch.nn.functional.silu(penalty_dist_min - dist) ** 2).mean()
+                # penalty = torch.zeros_like(dist)
+                # outside_range = (dist > penalty_dist) | (dist < penalty_dist_min)
+                # penalty[outside_range] = (dist[outside_range] - penalty_dist) ** 2
+                # penalty = penalty.mean()
+                # penalty = (sigmoid((dist - shift - penalty_dist) * mult) + sigmoid((dist + shift - penalty_dist_min) * -mult)).mean()
+
+            # -----------|-----x-----|-------------
+        
+        if split_losses:
+            return loss, penalty
+        else:
+            return loss + penalty
+
+    if split_losses:
+        return loss, torch.zeros_like(loss)
+    return loss
+
+def smoothness(
+    coords: List[torch.Tensor],
+    edge_index: Optional[EdgeIndex] = None,
+    compute_edges: Optional[bool] = False
+):
+    smoothnesses = np.array([])
+    if type(edge_index) == list:
+        it = zip(coords, edge_index)
+    else:
+        it = zip(coords, [edge_index for _ in range(len(coords))])
+    for coord, edge_index in it:
+        if compute_edges:
+            edge_index = compute_edge_index(None, coord, torch.LongTensor([coord.size(0)]), relative_edges=True, dynamic_edges=False, distance=None, n_neighbours=4, in_step=False, compute_gradients=False)
+        dist = torch.norm(coord[edge_index[0]] - coord[edge_index[1]], dim=-1)
+        smoothness = dist.mean()
+        smoothnesses = np.append(smoothnesses, smoothness.item())
+    
+    return smoothnesses, smoothnesses.mean(), smoothnesses.std()
+
+def distance_smoothness(
+    coords: List[torch.Tensor]
+):
+    smoothnesses = np.array([])
+    for i in range(len(coords) - 1):
+        dist = torch.norm(coords[i] - coords[i + 1], dim=-1)
+        smoothness = dist.mean()
+        smoothnesses = np.append(smoothnesses, smoothness.item())
+    
+    return smoothnesses, smoothnesses.mean(), smoothnesses.std()
+
+# @functools.lru_cache(maxsize=5)
+def ot_assignment(
+    initial_coord: torch.Tensor,
+    target_coord: torch.Tensor,
+    n_anchors: Optional[int] = None,
+    distance: Optional[float] = 0.27,
+    n_neighbours: int = 5,
+    lr: float = 5e-2,
+    steps: int = 150,
+    pb: Optional[bool] = False
+):
+    # Uses OT to assign the nodes of the target graph to the nodes of the initial graph'
+    # TODO make work for batches
+    with torch.no_grad():
+        coord = torch.nn.Parameter(initial_coord.clone())
+    optimizer = torch.optim.Adam([coord], lr=lr)
+    best_loss = float('inf')
+    steps_without_improvement = 0
+    if pb:
+        steps = tqdm(range(steps))
+    else:
+        steps = range(steps)
+    with torch.enable_grad():
+        for training_step in steps:
+            loss = sliced_ot_loss(coord, target_coord, per_sample_loss=False, split_losses=False)
+            optimizer.zero_grad()
+            loss.backward()
+            if n_anchors is not None:
+                coord.grad[-n_anchors:] = 0
+            optimizer.step()
+            if loss < best_loss:
+                best_loss = loss
+                steps_without_improvement = 0
+            else:
+                steps_without_improvement += 1
+            if steps_without_improvement > 0 and steps_without_improvement % 100 == 0:
+                optimizer.param_groups[0]['lr'] /= 2
+            if pb:
+                steps.set_postfix({'loss': loss.item(), 'best_loss': best_loss.item()})
+
+    edge_index = compute_edge_index(None, coord, torch.LongTensor([coord.size(0)]), relative_edges=True, dynamic_edges=False, distance=distance, n_neighbours=n_neighbours, in_step=False, compute_gradients=False)
+    return edge_index
+
+def local_ot_loss(
+    coord_1: torch.Tensor,
+    coord_2: torch.Tensor,
+    n_proj: int = 128 * 8,
+    per_sample_loss: Optional[bool] = False,
+    penalty: Optional[bool] = False,
+    edge_index: Optional[EdgeIndex] = None
+):
+    assert coord_1.ndim == coord_2.ndim == 3 or coord_1.ndim == coord_2.ndim == 2
+    if penalty: assert edge_index is not None
+    if coord_1.ndim == 2:
+        coord_1 = coord_1.unsqueeze(0)
+        coord_2 = coord_2.unsqueeze(0)
+    assert coord_1.size(0) == coord_2.size(0) and coord_1.size(-1) == coord_2.size(-1)
+
+    proj = torch.nn.functional.normalize(
+        torch.randn(coord_1.size(0), coord_1.size(2), n_proj, dtype=coord_1.dtype).to(coord_1.device), dim=1)
+    proj_1 = torch.sort(torch.bmm(coord_1, proj).permute(0, 2, 1), dim=-1)[0]
+    proj_2 = torch.sort(torch.bmm(coord_2, proj).permute(0, 2, 1), dim=-1)[0]
+    if proj_1.size(-1) != proj_2.size(-1):
+        proj_2 = torch.nn.functional.interpolate(proj_2, proj_1.size(-1), mode='nearest')
+
+def find_best_permutation(coord_1: torch.Tensor, coord_2: torch.Tensor, projections=128):
+    if coord_1.ndim == 2:
+        coord_1 = coord_1.unsqueeze(0)
+        coord_2 = coord_2.unsqueeze(0)
+    assert coord_1.size(0) == coord_2.size(0) and coord_1.size(-1) == coord_2.size(-1)
+
+    proj = torch.nn.functional.normalize(torch.randn(coord_1.size(0), coord_1.size(2), 128, dtype=coord_1.dtype).to(coord_1.device), dim=1)
+    projected_1 = torch.bmm(coord_1, proj).permute(0, 2, 1)[0]
+    projected_2 = torch.bmm(coord_2, proj).permute(0, 2, 1)[0]
+
+    sort_1 = torch.argsort(projected_1, dim=-1)
+    sort_2 = torch.argsort(projected_2, dim=-1)
+    sort_2_inv = torch.argsort(sort_2, dim=-1)
+    sort_1 = sort_1.gather(1, sort_2_inv)
+
+    best_perm = None
+    best_cost = float('inf')
+    for perm in sort_1.unique(dim=0):
+        cost = torch.norm(projected_1 - projected_2[:, perm], dim=-1).mean()
+        if cost < best_cost:
+            best_perm = perm
+            best_cost = cost
+
+    return best_perm

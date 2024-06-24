@@ -199,21 +199,43 @@ def coord2scatter(
     ax: Optional[plt.Axes] = None,
     show_anchors: Optional[bool] = False,
     n_anchors: Optional[int]= None,
+    anchor_coords: Optional[Union[torch.Tensor, np.ndarray]] = None,
+    anchor_colors: Optional[Union[str, List[str]]] = 'r',
+    anchor_scale: Optional[int] = 5,
 ):
     assert coord.ndim == 2 or coord.ndim == 3
     plt.rcParams.update({'font.size': font_size})
 
     if isinstance(coord, torch.Tensor):
         coord = coord.detach().cpu().numpy()
+    if anchor_coords is not None:
+        if isinstance(anchor_coords, torch.Tensor):
+            anchor_coords = anchor_coords.detach().cpu().numpy()
+        # coord = np.vstack([coord, anchor_coords])
+        n_anchors = anchor_coords.shape[0]
+    if show_anchors and anchor_coords is None:
+        anchor_coords = coord[-n_anchors:]
+        coord = coord[:-n_anchors]
     coord = coord - coord.mean(0, keepdims=True) if zero_center else coord
+    anchor_coords = anchor_coords - anchor_coords.mean(0, keepdims=True) if zero_center and show_anchors else anchor_coords
     n_anchors = coord.shape[1] + 1 if n_anchors is None else n_anchors
-    color = ['blue' for _ in range(coord.shape[0] - n_anchors)] + ['red' for _ in range(n_anchors)] if show_anchors else 'C0'
+    # if anchor_colors:
+    #     color = ['blue' for _ in range(coord.shape[0] - n_anchors)] + anchor_colors if show_anchors else 'C0'
+    # else:
+    #     color = ['blue' for _ in range(coord.shape[0] - n_anchors)] + ['red' for _ in range(n_anchors)] if show_anchors else 'C0'
+    # if show_anchors:
+    #     node_size = [node_size for _ in range(coord.shape[0] - n_anchors)] + [node_size * 3 for _ in range(n_anchors)]
+    #     shape = ['o' for _ in range(coord.shape[0] - n_anchors)] + ['^' for _ in range(n_anchors)]
+    # else:
+    #     shape = 'o'
     if coord.shape[1] == 2:
         if ax is None:
             fig, ax = plt.subplots()
             fig.tight_layout()
         ax.set_title(title)
-        ax.scatter(coord[:, 0], coord[:, 1], s=node_size, c=color)
+        ax.scatter(coord[:, 0], coord[:, 1], s=node_size)
+        if show_anchors:
+            ax.scatter(anchor_coords[:, 0], anchor_coords[:, 1], s=node_size * anchor_scale, c=anchor_colors, marker='^', zorder=10)
         if box_dim is not None:
             ax.set_xlim([-box_dim, box_dim])
             ax.set_ylim([-box_dim, box_dim])
@@ -233,7 +255,9 @@ def coord2scatter(
             fig.tight_layout()
             ax = fig.add_subplot(projection='3d')
         ax.set_title(title)
-        ax.scatter(coord[:, 0], coord[:, 1], coord[:, 2], s=node_size, c=color)
+        ax.scatter(coord[:, 0], coord[:, 1], coord[:, 2], s=node_size)
+        if show_anchors:
+            ax.scatter(anchor_coords[:, 0], anchor_coords[:, 1], anchor_coords[:, 2], s=node_size * anchor_scale, c=anchor_colors, marker='^', zorder=10)
         if box_dim is not None:
             ax.axes.set_xlim3d(left=-box_dim, right=box_dim)
             ax.axes.set_ylim3d(bottom=-box_dim, top=box_dim)
@@ -281,7 +305,8 @@ def plot_edge_index(
     box_dim: Optional[int] = None,
     font_size: Optional[int] = 15,
     title: Optional[str] = '',
-    ax: Optional[plt.Axes] = None
+    ax: Optional[plt.Axes] = None,
+    anchor_coords: Optional[Union[torch.Tensor, np.ndarray]] = None,
 ):
     plt.rcParams.update({'font.size': font_size})
     nx_graph = edge_index2nx_graph(edge_index, num_nodes)
@@ -291,11 +316,16 @@ def plot_edge_index(
     assert coord.shape[-1] == 2 or coord.shape[-1] == 3
     if isinstance(coord, torch.Tensor):
         coord = coord.detach().cpu().numpy()
+    if anchor_coords is not None:
+        if isinstance(anchor_coords, torch.Tensor):
+            anchor_coords = anchor_coords.detach().cpu().numpy()
     if coord.shape[-1] == 2:
         if ax is None:
             fig, ax = plt.subplots()
         ax.set_title(title)
         nx.draw(nx_graph, coord, with_labels=with_labels, node_size=node_size, node_color=node_color, ax=ax)
+        if anchor_coords is not None:
+            ax.scatter(anchor_coords[:, 0], anchor_coords[:, 1], s=node_size * 5, c='r', marker='^', zorder=10)
         if box_dim is not None:
             ax.axes.set_xlim([-box_dim, box_dim])
             ax.axes.set_ylim([-box_dim, box_dim])
