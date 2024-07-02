@@ -325,7 +325,7 @@ def plot_edge_index(
         ax.set_title(title)
         nx.draw(nx_graph, coord, with_labels=with_labels, node_size=node_size, node_color=node_color, ax=ax)
         if anchor_coords is not None:
-            ax.scatter(anchor_coords[:, 0], anchor_coords[:, 1], s=node_size * 5, c='r', marker='^', zorder=10)
+            ax.scatter(anchor_coords[:, 0], anchor_coords[:, 1], s=node_size * 5, c='r', marker='^', zorder=100)
         if box_dim is not None:
             ax.axes.set_xlim([-box_dim, box_dim])
             ax.axes.set_ylim([-box_dim, box_dim])
@@ -336,6 +336,8 @@ def plot_edge_index(
         plot_nx_graph_3d(
             edge_index2nx_graph(edge_index), coord, node_size=node_size, box_dim=box_dim, title=title, ax=ax,
             show_ax_values=show_ax_values, show_grid=show_grid, show_ax_labels=show_ax_labels, transparent=transparent)
+        if anchor_coords is not None:
+            ax.scatter(anchor_coords[:, 0], anchor_coords[:, 1], anchor_coords[:, 2], s=node_size * 5, c='r', marker='^', zorder=100)
     if return_coord:
         return coord
 

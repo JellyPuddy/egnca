@@ -421,7 +421,7 @@ def get_geometric_graph(
         coord, edge_index, anchor_coords = create_cube_cloud(anchor_coords=anchor_coords, anchor_dist=anchor_dist, anchor_scale=anchor_scale)
     elif name == 'Pyramid':
         coord, edge_index = create_pyramid(anchor_coords=anchor_coords, anchor_dist=anchor_dist)
-    elif name in ['Bunny', 'Grid2d', 'Torus']:
+    elif name in ['Bunny', 'Grid2d', 'Torus', 'Sphere']:
         coord, edge_index = load_pygsp_graph(name, anchor_coords, anchor_dist=anchor_dist, **kwargs)
     else:
         try:
