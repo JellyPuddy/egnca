@@ -6,7 +6,7 @@ This repository is a fork of https://github.com/gengala/egnca attempting to impr
 
 ## Angles
 
-<img src="./result_figures/angles-vs-original-animation.gif" width="300" height="300">
+<img src="./result_figures/angles-vs-original-animation.gif" width="600" height="300">
 
     python -m trainers.geometric_graph -ds Grid2d -sdg 0.05 -rdg 1.0 -bsc 0 8 2000 16 4000 32 -pats 800 -an --seed 42
     python -m trainers.geometric_graph -ds Grid2d -sdg 0.05 -rdg 1.0 -bsc 0 8 2000 16 4000 32 -pats 800     --seed 42
@@ -30,14 +30,15 @@ Non-persistent           |  Persistent
 
 ### Penalty
 
-<img src="./result_figures/grid-local-enp-ss_comparison.gif" width="300" height="300">
+<img src="./result_figures/grid-local-enp-ss_comparison.gif" width="600" height="300">
 
     python -m trainers.geometric_graph -ds Grid2d -bsc 0 4 -l local_enp -an --seed 42
     python -m trainers.geometric_graph -ds Grid2d -bsc 0 8 2000 16 4000 32 -l local_enp -pd 0.3 -ss -as corners -asc 1.5 -an --seed 42
 
 ### Different targets
 
-<img src="./result_figures/local-diff-shapes-animation.gif" width="300" height="300">
+<!-- <img src="./result_figures/local-diff-shapes-animation.gif" width="300" height="300"> -->
+<img src="https://drive.google.com/file/d/1plY13LX7eWIIyKf01JtWft24_8qHUZPa/view?usp=sharing" width="900" height="300">
 
     python -m trainers.geometric_graph -ds Cube -sdg 0.05 -rdg 1.0 -bsc 0 2 -l local_enp -pd 0.2 -ss -as corners -ad 0.15 -asc 0.5 -an --seed 42
     python -m trainers.geometric_graph -ds Torus -bsc 0 8 2000 16 -l local_enp -an -at undirected -ss -as corners -ad 0.5
@@ -46,20 +47,20 @@ Non-persistent           |  Persistent
 ## OT-based loss
 ### Anchors
 
-<img src="./result_figures/bare_ot-t50-animation.gif" width="300" height="300">
+<img src="./result_figures/bare_ot-t50-animation.gif" width="600" height="300">
 
     python -m trainers.geometric_graph -ds Grid2d -bsc 0 1 -l ot -ss -as simplex --seed 42
 
 ### Penalty
 
-<img src="./notebooks/grid otp ss simplex nodenorm.gif" width="300" height="300">
+<img src="./notebooks/grid otp ss simplex nodenorm.gif" width="600" height="300">
 
     python -m trainers.geometric_graph -ds Grid2d -bsc 0 1 -l ot_p -ss -as simplex --seed 42 -nt nn
 
 ### Static and dynamic relative edges
 #### Static
 
-<img src="./notebooks/grid otp ss simplex re nodenorm.gif" width="300" height="300">
+<img src="./notebooks/grid otp ss simplex re nodenorm.gif" width="600" height="300">
 
     python -m trainers.geometric_graph -ds Grid2d -bsc 0 1 -l ot_p -ss -as simplex -re -en 4 --seed 42 -nt nn
 
@@ -71,7 +72,7 @@ Non-persistent           |  Persistent
 
 #### Dynamic, every 5 steps
 
-<img src="./result_figures/grid otp ss simplex dyn animation.gif" width="300" height="300">
+<img src="./result_figures/grid otp ss simplex dyn animation.gif" width="600" height="600">
 
     python -m trainers.geometric_graph -ds Grid2d -bsc 0 8 2000 16 -l ot_p -pd 0.3 -an -ss -as corners -re -de -en 4 -des 5 -ad 0.3 --seed 42
     python -m trainers.geometric_graph -ds Grid2d -bsc 0 8 2000 16 -l ot_p -pd 0.3     -ss -as simplex -re -de -en 4 -des 5 -ad 0.3 --seed 42
@@ -85,7 +86,7 @@ Non-persistent           |  Persistent
 ### Beacons
 #### No persistency
 
-<img src="./result_figures/grid-otp-bc-pd_comp-edges-animation.gif" width="300" height="300">
+<img src="./result_figures/grid-otp-bc-pd_comp-edges-animation.gif" width="600" height="600">
 
     python -m trainers.geometric_graph -ds Grid2d -bsc 0 1 -l ot_p -apd -an -bc -as simplex -re -de -en 4 -des 5 --seed 42'
     python -m trainers.geometric_graph -ds Grid2d -bsc 0 1 -l ot_p -pd 0.3 -bc -as simplex -re -de -en 4 -des 5 --seed 42 -nt nn
@@ -94,7 +95,8 @@ Non-persistent           |  Persistent
 
 #### Persistency
 
-<img src="./result_figures/grid-pers-otp-bc-pd_comp-edges-250_steps.gif" width="300" height="300">
+<!-- <img src="./result_figures/grid-pers-otp-bc-pd_comp-edges-250_steps.gif" width="300" height="300"> -->
+<img src="https://drive.google.com/file/d/1v0uKqbdVi8sYXpQh4ufRqNDLKZV7iQM7/view?usp=sharing" width="600" height="600">
 
     python -m trainers.geometric_graph -ds Grid2d -bsc 0 8 2000 16 4000 32 -l ot_p -apd -bc -as simplex -re -de -en 4 -des 5 --seed 42 -nt nn
     python -m trainers.geometric_graph -ds Grid2d -bsc 0 8 2000 16 4000 32 -l ot_p -pd 0.3 -bc -as simplex -re -de -en 4 -des 5 --seed 42 -nt nn
@@ -118,11 +120,13 @@ Local damage               | Global damage
 
 #### Increased or decreased node count
 
-<img src="./result_figures/grid-robust-node_count_factor-edges-animation.gif" width="300" height="300">
+<!-- <img src="./result_figures/grid-robust-node_count_factor-edges-animation.gif" width="1500" height="600"> -->
+<img src="https://drive.google.com/file/d/140wQ-GTYflekb7xVrBeOxdZHsupSkGIJ/view?usp=sharing" width="1500" height="600">
 
 #### Decreased fire rate
 
-<img src="./result_figures/grid-robust-fire_rate-animation.gif" width="300" height="300">
+<!-- <img src="./result_figures/grid-robust-fire_rate-animation.gif" width="300" height="300"> -->
+<img src="https://drive.google.com/file/d/1qUGOCaR8KIUvhIQ5yuampMZqxfGTuVsr/view?usp=sharing" width="900" height="300">
 
 #### Rotated structured seeds
 E(*n*) Convergence to 2D-Grid           |  Adapting to rotated structured seeds
@@ -132,11 +136,11 @@ E(*n*) Convergence to 2D-Grid           |  Adapting to rotated structured seeds
 ### Different targets
 #### X and a
 
-<img src="./result_figures/x-a-comparison-50.gif" width="300" height="300">
+<img src="./result_figures/x-a-comparison-50.gif" width="600" height="600">
 
 #### Cube and Torus
 
-<img src="./result_figures/torus-cube-animation.gif" width="300" height="300">
+<img src="./result_figures/torus-cube-animation.gif" width="600" height="300">
 
 For testing, play with `notebooks/test_geometric_graph.ipynb` and `notebooks/visualise_results.ipynb`.
 
